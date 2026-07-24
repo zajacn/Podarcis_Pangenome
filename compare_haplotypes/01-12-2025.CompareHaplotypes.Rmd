@@ -1,0 +1,370 @@
+---
+title: "Comparing haplotypes"
+author: "Natalia Zajac"
+date: "26/08/2025 - stat; 1.12.2025 -> devs"
+output:
+  html_document: 
+    highlight: pygments
+    theme: sand
+    code_folding: hide
+    toc: yes
+    toc_depth: 4
+editor_options: 
+  chunk_output_type: inline
+---
+
+
+```{r include=FALSE}
+knitr::opts_chunk$set(
+  comment = '', fig.width = 8, fig.height = 8, warning = FALSE, error = FALSE,
+  message = FALSE, cache = TRUE, echo = FALSE
+)
+library(dplyr)
+library(plyr)
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(ggtree)
+library(ggnewscale)
+library(ezRun)
+library(patchwork)
+library(cowplot)
+library(ape)
+
+
+#Load data
+
+tree = "/groups/mpistaff/Zajac/genomes/mashtree.bootstrap.haplotypes.nwk"
+tree = treeio::read.tree(tree)
+sample_data = read_delim("/groups/mpistaff/Zajac/genomes/sample_data.tsv")
+org_names = sample_data$MyName
+sample_data$clade = factor(sample_data$clade, levels = c("Iberian", "Muralis", "Siculus", "Balkan", "Sicilian-Maltese", "Western"))
+sample_data = rbind(sample_data[,c(3,16,17)] %>% mutate(MyName = paste0(MyName, "#1")), sample_data[,c(3,16,17)] %>% mutate(MyName = paste0(MyName, "#2"))) %>% filter(!MyName %in% c("PodMur1#2", "rPodRaf1#2", "rPodCre2.1#2", "rPodLil1.2#2", "Pmuni1.1#1", "Pmuni1.1#2")) %>% unique() 
+sample_data$Hap = sapply(str_split(sample_data$MyName, "#"), .subset, 2)
+sample_data$TreeTipName = paste0(sample_data$Organism.Name, " #", sample_data$Hap)
+tree$tip.label = sample_data[match(tree$tip.label,sample_data$MyName),]$TreeTipName
+
+#BUSCO
+# busco_files = list.files("/groups/mpistaff/Zajac/analyses/BUSCO/", pattern = "short_summary.specific.squamata_odb12", recursive = TRUE)[grepl(".txt", list.files("/groups/mpistaff/Zajac/analyses/BUSCO/", pattern = "short_summary.specific.squamata_odb12.Busco", recursive = TRUE))]
+# 
+# busco_results = NULL
+# for (i in busco_files[1:26]){
+#   name = str_remove(sapply(str_split(i, "/"), .subset ,1), ".fasta")
+#   line8 <- readLines(paste0("/groups/mpistaff/Zajac/analyses/BUSCO/",i), n = 9)[9]
+#   line8 = data.frame(str_split(sapply(str_split(line8, "\t"), .subset, 2), ","))
+#   colnames(line8) = name
+#   line8[[1]] = sapply(str_split(line8[[1]], ":"), .subset, 2)
+#   line8[[1]] = as.numeric(str_remove(str_remove(str_remove(line8[[1]], "%"), "\\[S"), "\\]"))
+#   rownames(line8) = c("Complete", "Duplicated", "Framgented", "Missing", "n", "E")
+#   if (is.null(busco_results) == TRUE){
+#     busco_results = line8
+#   } else {
+#     busco_results = cbind(busco_results, line8)
+#   }
+# }
+# 
+# single = busco_results[1,] - busco_results[2,]
+# busco_results <- rbind(busco_results, single)
+# rownames(busco_results)[nrow(busco_results)] <- "Single"
+# busco_results = busco_results %>% rownames_to_column() %>% reshape2::melt(id.vars = "rowname") %>% filter(rowname == "Single") %>% dplyr::rename(MyName = variable) %>% mutate(MyName = str_remove(MyName,"Busco_")) 
+
+#BUSCO - fixed for sex chromosomes
+busco_results = read.delim("/groups/mpistaff/Zajac/analyses/BUSCO/summary.txt")
+                         
+#Sizes
+sizes = NULL
+for (i in list.files("/home/zajac/chromosome_sets/", patter = "fai", recursive = T)[grep("unmasked/community", list.files("/home/zajac/chromosome_sets/", patter = "fai", recursive = T))]){
+  xxx = read.delim(paste0("/home/zajac/chromosome_sets/",i), header = F)[,c(1,2)] %>% separate(V1, into = c("species", "haplotype", "chromosome"),sep = "#") %>% mutate(genome = paste0(species,"#", haplotype))
+  sizes = rbind(sizes, xxx)
+}
+sizes = merge(sizes, sizes %>% group_by(genome) %>% dplyr::summarise("Total.length" = sum(V2)), by = "genome")
+sizes$Hap = paste0(sizes$genome, "#", sizes$chromosome)
+
+#QUAST
+quast = NULL
+for (i in list.files("/groups/mpistaff/Zajac/analyses/quast_results_20chr/", pattern = "transposed_report.tsv", recursive = T)){
+  df = ezRead.table(file.path("/groups/mpistaff/Zajac/analyses/quast_results_20chr/", i))
+  quast = rbind(df, quast)
+}
+quast = quast[-1,]
+rownames(quast) = c(paste0(rownames(quast)[1:14], "#1"), str_replace(rownames(quast)[15:25], "_2.all", "#2"), str_replace(rownames(quast)[26], "_1.all", "#1"))
+
+#GC content
+all_gcns = NULL
+for (i in list.files("/groups/mpistaff/Zajac/analyses/GCN_content/", pattern = "GCN_CONTENT")[-1]){
+  bedfile = paste0("/groups/mpistaff/Zajac/genomes/ncbi_dataset/data/ALL_corrected_masked/", gsub(".GCN_CONTENT_200k.bedtools_nuc.bed", "", i), ".fasta.fai")
+  bed = read.delim(bedfile, header = F)[,c(1,2)]
+  colnames(bed) = c("Chr", "length")
+  chromosomes = bed %>% arrange(length) %>% dplyr::select(Chr) %>% as.list()
+  bed$Chr = factor(bed$Chr, levels = chromosomes$Chr)
+  gcn = read.delim(paste0("/groups/mpistaff/Zajac/analyses/GCN_content/" , i), header = F)
+  colnames(gcn) = c("Chr", "Start", "End", "GC", "N")
+  gcn$Chr = factor(gcn$Chr, levels = levels(bed$Chr))
+  all_gcns = rbind(all_gcns,gcn)
+}
+
+
+#Similarity from PanKmer
+pankmer = read.delim("ANI_PanKmer/genomes_adj_matrix.csv", check.names = FALSE, sep = ",")
+colnames(pankmer) = c("Name", str_remove(colnames(pankmer)[2:27], ".all"))
+pankmer$Name = str_remove(pankmer$Name, ".all")
+pankmer = pankmer %>% column_to_rownames("Name")
+pankmer = as.matrix(pankmer)
+pankmer <- as.matrix(pankmer) * 1   
+mode(pankmer) <- "numeric"
+k <- 31
+eps <- 1e-12
+genome_kmers <- diag(pankmer) 
+# Jaccard
+J <- matrix(NA, nrow(pankmer), ncol(pankmer), dimnames=dimnames(pankmer))
+for (i in 1:nrow(pankmer)) {
+  for (j in 1:ncol(pankmer)) {
+    shared <- pankmer[i, j]
+    union  <- genome_kmers[i] + genome_kmers[j] - shared
+    if (union > 0) {
+      J[i, j] <- shared / union
+    } else {
+      J[i, j] <- NA
+    }
+  }
+}
+J <- pmin(pmax(J, eps), 1 - eps, na.rm=TRUE)
+#ANI
+d   <- -(1/k) * log((2*J)/(1+J))
+ani <- 1 - d
+diag(ani) <- 1
+ani[ani < 0] <- 0
+ani[ani > 1] <- 1
+ani = ani %>% ezFrame() %>% rownames_to_column() %>% reshape2::melt(id.vars = "rowname")
+
+ani_diffsp =  merge(merge(ani, data.frame(rowname = c("rPodGai1#1", "rPodMel1#1", "rPodErh1#1", "rPodTil1#1", "rPodPit1#1", "rPodFil1#1", "rPodMur119#1", "rPodSic1#1", "rPodLio1#1", "rPodBoc1#1"),variable=c("rPodCre2.1#1", "rPodCre2.1#1","rPodCre2.1#1","rPodLil1.2#1", "rPodLil1.2#1", "rPodRaf1#1", "PodMur1#1", "PodMur1#1", "rPodVau1#1", "rPodVau1#1"))) %>% mutate(node_id = c(9,20,17,20,9,20,3,14,3,14)), sample_data[,c(3,5)], by.x = "rowname", by.y = "MyName") %>% dplyr::select(5,4,3)
+ani_diffsp$color = "Closely related species"
+
+ani =  merge( ani %>% filter(sapply(str_split(rowname, "#"), .subset, 1) == sapply(str_split(variable, "#"), .subset, 1)) %>% filter(rowname != variable) %>% group_by(value) %>% dplyr::summarise(rowname = dplyr::first(rowname), variable = dplyr::first(variable)) %>% mutate(node_id = c(13,7,5,11,19,9,2,16,22,24,26)), sample_data[,c(3,5)], by.x = "rowname", by.y = "MyName") %>% dplyr::select(5,4,2)
+ani$color = "Haplotypes same species"
+
+#SYRI Synteny between haplotypes
+all_syns = NULL
+for (i in list.files("SYRI_Hap1vsHap2/", pattern = ".summary", recursive = TRUE)){
+  name1 = sapply(str_split(str_remove(sapply(str_split(i , "/"), .subset, 2), "syri.summary"), "_"), .subset, 1)
+  name2 = sapply(str_split(str_remove(sapply(str_split(i , "/"), .subset, 2), "syri.summary"), "_"), .subset, 2)
+  df = read.delim(paste0("SYRI_Hap1vsHap2/",i), skip = 1)[c(-9,-8),] %>% mutate("Sp1" = str_remove(name1, ".rev"), "Sp2" = str_remove(name2, ".rev")) 
+  df = df %>% reshape2::melt(id.vars = c("X.Variation_type", "Length_ref", "Length_qry", "Count"))
+  df = rbind(df[df$variable == "Sp1",c(1,2,5,6)] %>% dplyr::rename(Length = Length_ref), df[df$variable == "Sp2",c(1,3,5,6)] %>% dplyr::rename(Length = Length_qry)) %>% filter(Length != "-")
+  all_syns = rbind(all_syns,df)
+}
+all_syns = merge(all_syns, sizes[,c(5,7)], by = "value", by.y = "Hap")
+all_syns = all_syns %>% mutate(quality = if_else(sapply(str_split(value, "#"), .subset, 1) %in% c("rPodLio1", "rPodSic1", "rPodErh1", "rPodFil1", "rPodMur119"), "scaffold_level_assembly", "chromosome_level_assembly"))
+
+#Synteny between closely related species
+all_syns_diffsp = NULL
+for (i in list.files("SYRI_Hap1vsHap1_DifferentSpecies/", pattern = ".summary", recursive = TRUE)){
+  name1 = sapply(str_split(str_remove(sapply(str_split(i , "/"), .subset, 2), "syri.summary"), "_"), .subset, 1)
+  name2 = sapply(str_split(str_remove(sapply(str_split(i , "/"), .subset, 2), "syri.summary"), "_"), .subset, 2)
+  df = read.delim(paste0("SYRI_Hap1vsHap1_DifferentSpecies/",i), skip = 1)[c(-9,-8),] %>% mutate("Sp1" = str_remove(name1, ".rev"), "Sp2" = str_remove(name2, ".rev")) 
+  df = df %>% reshape2::melt(id.vars = c("X.Variation_type", "Length_ref", "Length_qry", "Count"))
+  df = rbind(df[df$variable == "Sp1",c(1,2,5,6)] %>% dplyr::rename(Length = Length_ref), df[df$variable == "Sp2",c(1,3,5,6)] %>% dplyr::rename(Length = Length_qry)) %>% filter(Length != "-")
+  all_syns_diffsp = rbind(all_syns_diffsp,df)
+}
+all_syns_diffsp = all_syns_diffsp[all_syns_diffsp$value != "community9",]
+all_syns_diffsp = all_syns_diffsp[!is.na(all_syns_diffsp$value),]
+all_syns_diffsp$value = gsub("\\.$", "", all_syns_diffsp$value)
+all_syns_diffsp = merge(all_syns_diffsp, sizes[,c(5,7)], by = "value", by.y = "Hap")
+all_syns_diffsp$quality = "closely related species"
+
+SYRI_synteny = rbind(all_syns_diffsp, all_syns)
+
+#HalSynteny between haplotypes
+psls = NULL
+for (i in list.files("/home/zajac/CompareHaplotypes/HalSynteny_Hap1vsHap2/", pattern = ".psl")){
+  name=sapply(str_split(i, "_"), .subset, 1)
+  psl_syn = read.delim(paste0("/home/zajac/CompareHaplotypes/HalSynteny_Hap1vsHap2/",i), header = F)
+  colnames(psl_syn) = c("matches", "misMatches" ,"repMatches","nCount","qNumInsert","qBaseInsert","tNumInsert","tBaseInsert" ,"strand","seq_id","qSize","start","end","seq_id2","tSize","start2","end2","blockCount","blockSizes","qStarts","tStarts")
+  psl_syn = psl_syn[,c(1,6,8,10,14)] %>% reshape2::melt(id.vars = c("matches", "qBaseInsert", "tBaseInsert"))
+  psl_syn = rbind(psl_syn[psl_syn$variable == "seq_id",c(1,3,4,5)] %>% dplyr::rename(BaseInsert = tBaseInsert), psl_syn[psl_syn$variable == "seq_id2",c(1,2,4,5)] %>% dplyr::rename(BaseInsert = qBaseInsert))
+  psl_syn = psl_syn %>% group_by(value, variable) %>% dplyr::summarise(BaseInsert = sum(BaseInsert), matches = sum(matches))
+  psls = rbind(psl_syn, psls)
+}
+psls$value = gsub("_", "#", psls$value)
+psls = psls %>% mutate(quality = if_else(sapply(str_split(value, "#"), .subset, 1) %in% c("rPodLio1", "rPodSic1", "rPodErh1", "rPodFil1", "rPodMur119"), "scaffold_level_assembly", "chromosome_level_assembly"))
+psls = merge(psls, sizes[,c(5,7)], by.x = "value", by.y = "Hap")
+
+#Compare SYRI and HalSynteny -> merge(psls[,c(2,1,11,10)], syri_syntenty, by.x = c("seq_id2", "seq_id"), by.y = c("Sp1", "Sp2"))
+#HalSynteny between closely related species
+psls_diffsp = NULL
+for (i in list.files("HalSynteny_Hap1vsHap2/", pattern = ".psl")){
+  name=sapply(str_split(i, "_"), .subset, 1)
+  psl_syn = read.delim(paste0("HalSynteny_Hap1vsHap2/",i), header = F)
+  colnames(psl_syn) = c("matches", "misMatches" ,"repMatches","nCount","qNumInsert","qBaseInsert","tNumInsert","tBaseInsert" ,"strand","seq_id","qSize","start","end","seq_id2","tSize","start2","end2","blockCount","blockSizes","qStarts","tStarts")
+  psl_syn = psl_syn[,c(1,6,8,10,14)] %>% reshape2::melt(id.vars = c("matches", "qBaseInsert", "tBaseInsert"))
+  psl_syn = rbind(psl_syn[psl_syn$variable == "seq_id",c(1,3,4,5)] %>% dplyr::rename(BaseInsert = tBaseInsert), psl_syn[psl_syn$variable == "seq_id2",c(1,2,4,5)] %>% dplyr::rename(BaseInsert = qBaseInsert))
+  psl_syn = psl_syn %>% group_by(value, variable) %>% dplyr::summarise(BaseInsert = sum(BaseInsert), matches = sum(matches))
+  psls_diffsp = rbind(psls_diffsp, psls)
+}
+psls_diffsp$value = gsub("_", "#", psls_diffsp$value)
+psls_diffsp = psls_diffsp %>% mutate(quality = "closely related species")
+psls_diffsp = merge(psls_diffsp, sizes[,c(5,7)], by.x = "value", by.y = "Hap")
+
+
+genes = read.delim("../GeneSpace2/bed/nb_genes.txt", header = FALSE)
+
+#Genic hemizygosity
+
+max.func <- function(df) {
+   max.res <- max(df$V3)
+
+   return(data.frame(V2 = df$V2[df$V3==max.res],
+                     V3 = max.res))
+}
+
+genicH = NULL
+for (i in unique(org_names)[c(-2, -3, -4, -10, -12)]){
+  hap1 = ape::read.FASTA(paste0("/home/zajac/CompareHaplotypes/BLAST_GenicHemizygosity/", i, "#1.all.subset.aa"))
+  hap1 = length(names(hap1))
+  hap2 =  ape::read.FASTA(paste0("/home/zajac/CompareHaplotypes/BLAST_GenicHemizygosity/", i, "#2.all.aa"))
+  hap2 = length(names(hap2))
+  x = read.delim(paste0(paste0("/home/zajac/CompareHaplotypes/BLAST_GenicHemizygosity/", i, ".blastn.tsv")), header = F)
+  x = ddply(x, .(V1), max.func)
+  x2 = read.delim(paste0(paste0("/home/zajac/CompareHaplotypes/BLAST_GenicHemizygosity/", i, ".blastn.RB.tsv")), header = F)
+  x2 = ddply(x2, .(V1), max.func)
+  blast_res = length(unique(c(x[x$V3 > 70,]$V1, x2[x2$V3 > 70,]$V2))) + length(unique(c(x[x$V3 > 70,]$V2, x2[x2$V3 > 70,]$V1)))
+  total = hap2 + hap1
+  genic_hemizygosity = (1 - blast_res/total)* 100
+  genicH = rbind(genicH, data.frame("species" = i, "genic_hemizygosity" = genic_hemizygosity))
+}
+
+#OMARK results
+omark_files = list.files("/groups/mpistaff/Zajac/proteomes/data/ALL_Tiberius_annotated/OMARK/", pattern = ".sum$", recursive = TRUE, full.names = FALSE)[12:37]
+omark_results = NULL
+for (i in omark_files){
+  name = str_remove(sapply(str_split(i, "/"), .subset ,1), ".sum")
+  line8 <- readLines(paste0("/groups/mpistaff/Zajac/proteomes/data/ALL_Tiberius_annotated/OMARK/",i))[6]
+  line8 = data.frame(Result = str_remove(sapply(str_split(str_remove(sapply(str_split(line8, ","), .subset, 1), "S:"), "\\["), .subset, 1), "%")) %>% mutate(Genome= name)
+  if (is.null(omark_results) == TRUE){
+    omark_results = line8
+  } else {
+    omark_results = rbind(omark_results, line8)
+  }
+}
+omark_results[omark_results$Genome == "PodMur1",]$Genome = "PodMur1#1"
+omark_results[omark_results$Genome == "rPodRaf1",]$Genome = "rPodRaf1#1"
+
+#Fix sex chromosomes issue with OMARK
+omark_files = list.files("/groups/mpistaff/Zajac/proteomes/data/ALL_Tiberius_annotated/OMARK/", pattern = ".sum$", recursive = TRUE, full.names = FALSE)[1:11]
+omark_results_nozw = NULL
+for (i in omark_files){
+  name = str_replace(sapply(str_split(i, "/"), .subset ,2), "NoZW.sum", "#1")
+  line8 <- readLines(paste0("/groups/mpistaff/Zajac/proteomes/data/ALL_Tiberius_annotated/OMARK/",i))[6]
+  line8 = data.frame(Result = str_remove(sapply(str_split(str_remove(sapply(str_split(line8, ","), .subset, 1), "S:"), "\\["), .subset, 1), "%")) %>% mutate(Genome= name)
+  if (is.null(omark_results_nozw) == TRUE){
+    omark_results_nozw = line8
+  } else {
+    omark_results_nozw = rbind(omark_results_nozw, line8)
+  }
+}
+omark_results = merge(omark_results_nozw,omark_results, by = c("Genome"), all = TRUE ) %>% replace(is.na(.),0) %>% mutate(diff = as.numeric(Result.y) - as.numeric(Result.x)) %>% mutate(species = gsub("#(\\d+)", "", Genome))
+
+omark_results2 = NULL
+for (i in unique(omark_results$species)){
+  df = omark_results[omark_results$species == i,]
+  if ( nrow(df) > 1){
+    df = data.frame(Genome = df$Genome, Result = c(df$Result.y[1], as.numeric(df$Result.y[2]) + df$diff[1]))
+  } else {
+    df = df[,c(1,3)]
+    colnames(df) = c("Genome", "Result")
+  }
+  omark_results2 = rbind(omark_results2, df)
+}
+
+omark_results = omark_results2
+```
+
+# {.tabset}
+ 
+The aim of this notebook is 
+1. to understand whether there are any artefactual problems related to haplotypes not assembled to chromosomes.  
+2. Are hap2s very different from hap1s
+
+Some hap2s have only been assembled to scaffolds - not manually curated: P.muralis nig;  P. liolepis; P. siculus; P. filfolensis; P. erhardi      
+All hap2s are supposed to be less complete.
+
+## Summary tree genome
+
+```{r, fig.height=15, fig.width=25, echo=FALSE, warning=FALSE, message=FALSE}
+p1 = ggtree(tree) +
+    geom_tiplab(size = 7) + 
+    xlim_expand(c(0,0.09), panel = "Tree")
+
+p1 = p1 %<+% merge(p1$data, sample_data, by.x = "label", by.y = "TreeTipName") + geom_tippoint(aes(color=clade)) + scale_color_manual(values = c("magenta2", "green", "yellow", "purple", "palegreen3", "blue3", "red", "orange", "darkgrey","skyblue", "black")) + labs(color = "Clade")
+
+p1 + 
+    new_scale_fill() +
+    geom_facet(panel = "Genome Length (Gb)", data = quast %>% rownames_to_column("MyName") %>% left_join(sample_data) %>% dplyr::select(26,8) , geom = geom_col,mapping=aes(x = `Total length (>= 0 bp)`/1000000000, y = y), orientation = 'y', width = .6,inherit.aes = FALSE) + 
+    geom_facet(panel = "Scaffold N50 (Mb)", data = quast %>% rownames_to_column("MyName") %>% left_join(sample_data) %>% dplyr::select(26,18) , geom = geom_col,mapping=aes(x = N50/1000000, y = y), orientation = 'y', width = .6,inherit.aes = FALSE) + 
+    geom_facet(panel = "#Ns per 100kb", data = quast %>% rownames_to_column("MyName") %>% left_join(sample_data) %>% dplyr::select(26,22) , geom = geom_point,mapping=aes(x = `# N's per 100 kbp`, y = y),inherit.aes = FALSE) + 
+    geom_facet(panel = "BUSCO Complete (%)", data = busco_results %>% mutate(haplotype = sapply(str_split(Genome, "#"), .subset, 2)) %>% dplyr::rename(MyName = Genome) %>% left_join(sample_data) %>% dplyr::select(7,3,2), geom = geom_point, mapping=aes(x = Complete_Busco, y = y, colour = haplotype),size = 4, inherit.aes = FALSE) + 
+    geom_facet(panel = "GC content (%)", data =  quast %>% rownames_to_column("MyName") %>% left_join(sample_data) %>% dplyr::select(26,17), geom = geom_point,mapping=aes(x = `GC (%)`, y = y),inherit.aes = FALSE, colour ="blue", size = 3) + 
+    geom_facet(panel = str_wrap("Average Nucleotide Identity",20), data = rbind(ani,ani_diffsp), geom = geom_segment,mapping=aes(x = as.numeric(value) * 100, xend = as.numeric(value) * 100, y = y, yend = node_id, color = color), size = 4, inherit.aes = FALSE) +  
+    theme_bw() + theme(text = element_text(size = 25), legend.position = "top", legend.justification='left') + guides(colour=guide_legend(ncol=3))
+
+```
+
+## Summary tree proteome
+
+```{r, fig.height=15, fig.width=25, echo=FALSE, warning=FALSE, message=FALSE}
+p1 = ggtree(tree) +
+    geom_tiplab(size = 7) + 
+    xlim_expand(c(0,0.08), panel = "Tree")
+
+p1 = p1 %<+% merge(p1$data, sample_data, by.x = "label", by.y = "TreeTipName") + geom_tippoint(aes(color=clade)) + scale_color_manual(values = c("magenta2", "green", "yellow", "purple", "palegreen3", "blue3", "red", "orange", "darkgrey","skyblue", "black")) + labs(color = "Clade")
+
+p1 + 
+    new_scale_fill() + 
+    geom_facet(panel = "Number of genes (k)", data = genes %>% mutate(haplotype = sapply(str_split(V1, "#"), .subset, 2), MyName = V1) %>% left_join(sample_data) %>% dplyr::select(8,2,3), mapping = aes(x = V2/1000, y=y, colour = haplotype), size = 4, geom = geom_point, inherit.aes = FALSE) + 
+    geom_facet(panel = "Genic Hemizygosity", data = rbind(genicH %>% mutate(species = paste0(species, "#1")),genicH %>% mutate(species = paste0(species, "#2"))) %>% dplyr::rename(MyName = species) %>% left_join(sample_data) %>% dplyr::select(6,2), mapping = aes(x = genic_hemizygosity, y=y), size = 4, geom= geom_point,inherit.aes = FALSE) + 
+    geom_facet(panel ="OMARK Single (%)", data = omark_results %>% dplyr::select(2,1) %>% mutate(haplotype = sapply(str_split(Genome, "#"), .subset, 2)) %>% dplyr::rename(MyName = Genome) %>% left_join(sample_data) %>% dplyr::select(7,1,3) , geom = geom_point,mapping=aes(x =as.numeric(Result), y = y, colour = haplotype),size = 4, inherit.aes = FALSE) +  
+    theme_bw() + theme(text = element_text(size = 25), legend.position = "top", legend.justification='left') + guides(colour=guide_legend(ncol=1))
+
+```
+
+
+## Alternatively just normal plot no tree
+
+```{r, fig.height=15, fig.width=25, echo=FALSE, warning=FALSE, message=FALSE}
+genes[genes$V1 == "rPodLil1.2#1",]$V2 = 21279
+data = merge(p1$data[p1$data$Hap == 1,c(4,10,11,12)] %>% filter(!is.na(label)), genes, by.x = "MyName", by.y = "V1")
+data = merge(data, genicH %>% mutate(species = paste0(species, "#1")) , by.x = "MyName", by.y = "species", all = TRUE)
+data = merge(data, omark_results , by.x = "MyName", by.y = "Genome")
+
+data$Organism.Name = factor(data$Organism.Name, levels = rev(c("Podarcis cretensis","Podarcis erhardii", "Podarcis melisellensis", "Podarcis gaigeae", "Podarcis raffonei", "Podarcis filfolensis", "Podarcis tiliguerta","Podarcis lilfordi",  "Podarcis pityusensis","Podarcis liolepis","Podarcis vaucheri","Podarcis bocagei", "Podarcis muralis","Podarcis muralis nigriv.", "Podarcis siculus")))
+
+pdf("../Figures/Annotation_quality.pdf", width = 7, height = 6)
+data %>% reshape2::melt(id.vars = c("MyName","label","Organism.Name","clade")) %>% replace(is.na(.),0) %>% ggplot(aes(as.numeric(value), Organism.Name)) + geom_point(size = 2) + facet_grid(~variable, scales = "free") + theme_bw() + theme(text = element_text(size = 15), legend.position = "top", legend.justification='left') + labs(x = "", y = "") + scale_y_discrete(labels = function(x) str_wrap(x, width = 10))
+dev.off()
+```
+
+
+## Synteny
+
+
+```{r, fig.height=5, fig.width=15, echo=FALSE, warning=FALSE, message=FALSE}
+
+p1 = SYRI_synteny[SYRI_synteny$X.Variation_type == "Syntenic regions",] %>% mutate(Length = as.numeric(Length)*100/V2) %>% mutate(MyName = paste0(sapply(str_split(value, "#"), .subset, 1), "#", sapply(str_split(value, "#"), .subset, 2))) %>% left_join(sample_data) %>% dplyr::select(11,6,3) %>% ggplot(aes(factor(quality, levels = c("chromosome_level_assembly", "scaffold_level_assembly", "closely related species")), Length)) + geom_boxplot(fill = "lightblue") + theme_bw() + labs(y = "% Chromosome Length in Syntenic Blocks", x = "") + theme(text = element_text(size = 15))
+
+p2 = SYRI_synteny[!SYRI_synteny$X.Variation_type %in% c("SNPs", "Syntenic regions", "Not aligned (reference)","Not aligned (query)", "Highly diverged"),] %>% mutate(Length = as.numeric(Length)*100/V2)  %>% ggplot(aes(factor(quality, levels = c("chromosome_level_assembly", "scaffold_level_assembly", "closely related species")), Length)) + geom_boxplot(fill = "lightblue") + scale_y_sqrt() + theme_bw() + theme(text = element_text(size = 15)) + labs(y = "% Chromosome Length in Structural Variants", x = "")
+
+p1 + p2
+```
+
+
+## Quick overview of SYRI results between haplotypes of same species
+
+
+```{r, fig.height=5, fig.width=15, echo=FALSE, warning=FALSE, message=FALSE}
+
+
+SYRI_synteny[!(SYRI_synteny$X.Variation_type %in% c("Highly diverged", "Syntenic regions")) & SYRI_synteny$quality == "chromosome_level_assembly",]  %>% mutate(Length = as.numeric(Length)*100/V2) %>% mutate(MyName = paste0(sapply(str_split(value, "#"), .subset, 1), "#", sapply(str_split(value, "#"), .subset, 2))) %>% left_join(sample_data) %>% group_by(value,X.Variation_type, TreeTipName) %>% dplyr::summarise(sum(Length)) %>% group_by(TreeTipName, X.Variation_type) %>% dplyr::summarise(mean(`sum(Length)`)) %>% ggplot(aes(X.Variation_type , `mean(\`sum(Length)\`)`)) + geom_boxplot()
+
+
+```
+

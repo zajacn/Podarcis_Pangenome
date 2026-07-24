@@ -1,0 +1,190 @@
+---
+title: "Squamate genome synteny"
+author: "Natalia Zajac"
+date: "21/10/2025"
+output:
+  html_document: 
+    highlight: pygments
+    theme: sand
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+
+```{r include=FALSE}
+knitr::opts_chunk$set(
+  comment = '', fig.width = 8, fig.height = 8, warning = FALSE, error = FALSE,
+  message = FALSE, cache = TRUE, echo = FALSE
+)
+```
+
+
+```{r setup, include=FALSE}
+
+library(utils)
+library(dplyr)
+library(tidyverse)
+library(reshape2)
+library(cowplot)
+library(patchwork)
+library(ezRun)
+library(data.table)
+
+
+squamates_df = read.delim("data/NCBI_available_genomes.summary.July2025.txt")
+
+analysed_genomes = data.frame(abb = sapply(str_split(list.files("../SquamateGenomics/ntsynt/", pattern = ".msh"), "_"), .subset, 1), genome = str_remove(gsub("^x[a-zA-Z]+_", "", str_remove(list.files("data/", pattern = ".msh"), "_genomic.fna.chr.fna.msh")), "#1.all.fasta.msh"))
+analysed_genomes$speciesname <- sapply(analysed_genomes$genome, function(x) {
+    hits <- unique(str_replace(squamates_df[grepl(x, squamates_df$ftps),]$speciesname, " ", "_"))
+    if (length(hits) > 0) hits[1] else NA
+})
+
+tree_dist = read.delim("data/distances_lizards.tsv")
+tree_dist = tree_dist[tree_dist$X %in% analysed_genomes$speciesname, colnames(tree_dist) %in% c("X", analysed_genomes$speciesname)] %>% reshape2::melt(id.vars = "X") %>% filter(X != variable)
+colnames(tree_dist) = c("V1sp", "V2sp", "tree_distance")
+
+tree_dist2 = read.delim("data/distances_snakes.tsv")
+tree_dist2 = tree_dist2[tree_dist2$X %in% analysed_genomes$speciesname, colnames(tree_dist2) %in% c("X", analysed_genomes$speciesname)] %>% reshape2::melt(id.vars = "X") %>% filter(X != variable)
+colnames(tree_dist2) = c("V1sp", "V2sp", "tree_distance")
+
+tree_dist = rbind(tree_dist,tree_dist2)
+
+msh_dist = read.delim("data/pairwise_mash_distances.txt", header = F)
+msh_dist$V1 = str_remove(gsub("^x[a-zA-Z]+_", "", msh_dist$V1), "#1")
+msh_dist$V2 = str_remove(gsub("^x[a-zA-Z]+_", "", msh_dist$V2), "#1")
+msh_dist$V1sp <- sapply(msh_dist$V1, function(x) {
+    hits <- str_replace(squamates_df$speciesname[grepl(x, squamates_df$ftps)], " ", "_")
+    if (length(hits) > 0) hits[1] else NA
+})
+msh_dist$V2sp <- sapply(msh_dist$V2, function(x) {
+    hits <- str_replace(squamates_df$speciesname[grepl(x, squamates_df$ftps)], " ", "_")
+    if (length(hits) > 0) hits[1] else NA
+})
+msh_dist = msh_dist[,c(6,7,3)] %>% mutate(V3 = round(as.numeric(V3), 2)) %>% filter(V1sp != V2sp)
+colnames(msh_dist) = c("V1sp", "V2sp", "mash_distance")
+
+synteny = NULL
+for (i in list.files("data/", pattern = "stats", recursive = T)){
+  df = read.delim(paste0("data/", i))
+  df = data.frame(comp = sapply(str_split(i, "/"), .subset, 1), Average_coverage = df$Average_coverage) %>% separate(comp, into = c("V1sp", "V2sp"), sep = "_")
+  df$V1sp = analysed_genomes[analysed_genomes$abb %in% df$V1sp,]$speciesname
+  df$V2sp = analysed_genomes[analysed_genomes$abb %in% df$V2sp,]$speciesname
+  synteny = rbind(synteny, df)
+}
+
+final = merge(merge(msh_dist, synteny, by = c("V1sp", "V2sp"), all = TRUE), tree_dist, by = c("V1sp", "V2sp"), all = TRUE)
+
+sqm_df = read.delim("data/squamates_Title_Science2024_family_classification.txt")
+
+final = merge(merge(final, sqm_df[,c(1,5,6)], by.x = "V1sp", by.y = "label", all.x = TRUE), sqm_df[,c(1,5,6)], by.x = "V2sp", by.y = "label", all.x = TRUE) %>% dplyr::rename( "V1spclade" = clade.x , "V1spfamilies" = families.x,  "V2spclade" = clade.y, "V2spfamilies" = families.y )
+#Fix
+final[final$V2sp == "Phrynocephalus_guinanensis", ]$V2spfamilies = "Agamidae"
+final[final$V2sp == "Phrynocephalus_guinanensis", ]$V2spclade = "Iguania"
+final[final$V1sp == "Phrynocephalus_guinanensis", ]$V1spfamilies = "Agamidae"
+final[final$V1sp == "Phrynocephalus_guinanensis", ]$V1spclade = "Iguania"
+
+final[final$V2sp == "Spondylurus_nitidus", ]$V2spfamilies = "Scincidae"
+final[final$V2sp == "Spondylurus_nitidus", ]$V2spclade = "Scincoidea"
+final[final$V1sp == "Spondylurus_nitidus", ]$V1spfamilies = "Scincidae"
+final[final$V1sp == "Spondylurus_nitidus", ]$V1spclade = "Scincoidea"
+
+
+final$comp_clade = case_when(final$V2spclade == final$V1spclade ~ "within", .default = paste0(final$V2spclade, "_", final$V1spclade))
+final$comp_fam = case_when(final$V2spfamilies == final$V1spfamilies ~ "within", .default = paste0(final$V2spfamilies, "_", final$V1spfamilies)) 
+final$comp_cat1 = case_when(grepl("Podarcis", final$V1sp) & grepl("Podarcis", final$V2sp) ~ "within Podarcis", final$V2spclade == final$V1spclade ~ paste0("within ", final$V1spclade), .default = "between clades")
+final$comp_cat2 = case_when(grepl("Podarcis", final$V1sp) & grepl("Podarcis", final$V2sp) ~ "Podarcis", final$V2spfamilies == final$V1spfamilies ~ "within same family", .default = "between families")
+final$V1genus = sapply(str_split(final$V1sp, "_"), .subset, 1)
+final$V2genus = sapply(str_split(final$V2sp, "_"), .subset, 1)
+final$comp_cat3 = case_when(grepl("Podarcis", final$V1sp) & grepl("Podarcis", final$V2sp) ~ "Podarcis", final$V1genus == final$V2genus ~ "within same genus", .default = "between genera")
+```
+
+
+## Figures with tree distance
+
+### Between or within clades
+
+```{r fig.height=6, fig.width=8, echo=FALSE,warning=FALSE,message=FALSE}
+ggplot(final, aes(tree_distance, Average_coverage, colour = comp_cat1)) + geom_point() + theme_bw() + ylim(50,100) + scale_colour_manual(values = c("grey", "black", brewPalette(n=10)[c(1,3,5,6,7,8)])) + labs(x = "Distance on phylogenetic tree", y = "Average genome length\nin syntenic blocks", colour = "") + theme(text = element_text(size = 13))
+
+```
+
+### Between or within families
+
+```{r fig.height=6, fig.width=8, echo=FALSE,warning=FALSE,message=FALSE}
+
+ggplot(final, aes(tree_distance, Average_coverage, colour = comp_cat2)) + geom_point() + theme_bw()
+
+```
+
+### Between or within genra
+
+```{r fig.height=6, fig.width=8, echo=FALSE,warning=FALSE,message=FALSE}
+
+ggplot(final, aes(tree_distance, Average_coverage, colour = comp_cat3)) + geom_point()  + theme_bw()
+
+```
+
+
+### families
+
+```{r fig.height=6, fig.width=8, echo=FALSE,warning=FALSE,message=FALSE}
+
+ggplot(final, aes(tree_distance, Average_coverage, colour = comp_fam)) + geom_point() + scale_colour_manual(values = c(brewPalette(n=506), "black")) + theme_bw() + theme(legend.position = "")
+
+```
+
+### clades
+
+```{r fig.height=8, fig.width=12, echo=FALSE,warning=FALSE,message=FALSE}
+
+ggplot(final, aes(tree_distance, Average_coverage, colour = comp_clade)) + geom_point() + scale_colour_manual(values = c(brewPalette(n=42), "black"))  + theme_bw() + guides(colour = guide_legend(ncol = 2)) 
+
+```
+
+
+## Figures with mash distance
+
+### Between or within clades
+
+```{r fig.height=6, fig.width=8, echo=FALSE,warning=FALSE,message=FALSE}
+
+ggplot(final, aes(mash_distance, Average_coverage, colour = comp_cat1)) + geom_point()  + theme_bw()
+
+```
+
+### Between or within families
+
+```{r fig.height=6, fig.width=8, echo=FALSE,warning=FALSE,message=FALSE}
+
+ggplot(final, aes(mash_distance, Average_coverage, colour = comp_cat2)) + geom_point()  + theme_bw()
+
+```
+
+
+### Between or within genra
+
+```{r fig.height=6, fig.width=8, echo=FALSE,warning=FALSE,message=FALSE}
+
+ggplot(final, aes(mash_distance, Average_coverage, colour = comp_cat3)) + geom_point() + theme_bw()
+
+```
+
+
+### families
+
+```{r fig.height=6, fig.width=8, echo=FALSE,warning=FALSE,message=FALSE}
+
+ggplot(final, aes(mash_distance, Average_coverage, colour = comp_fam)) + geom_point() + scale_colour_manual(values = c(brewPalette(n=506), "black"))  + theme_bw() + theme(legend.position = "")  
+
+```
+
+### clades
+
+```{r fig.height=8, fig.width=12, echo=FALSE,warning=FALSE,message=FALSE}
+
+ggplot(final, aes(mash_distance, Average_coverage, colour = comp_clade)) + geom_point() + scale_colour_manual(values = c(brewPalette(n=42), "black"))  + theme_bw() + guides(colour = guide_legend(ncol = 2)) 
+
+```
+
+
