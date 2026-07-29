@@ -12,12 +12,15 @@ library(vcfR)
 library(stringr)
 library(dplyr)
 library(tidyverse)
+library(ape)
+library(phytools)
+library(ggrepel)
 
 sample_data = read.delim("/groups/mpistaff/Zajac/genomes/sample_data.tsv")
 sample_data$clade=factor(sample_data$clade,levels=c("Balkan","Sicilian-Maltese","Western","Siculus","Muralis","Iberian"))
 
-##Load thinned SNP dataset - SNPs thinned to 1 SNP every 100bp confirmed with bcftools
-snps = list.files("INVERSIONS/", pattern = "combined.thinned.vcf.gz$", recursive = TRUE, full.names = TRUE)
+##Load thinned SNP dataset - SNPs thinned to 1 SNP every 50bp confirmed with bcftools
+snps = list.files("INVERSIONS/", pattern = "combined.thinned50.vcf.gz$", recursive = TRUE, full.names = TRUE)
 all_snps = NULL
 for (i in snps){
   snps = read.vcfR(i)
@@ -28,8 +31,7 @@ for (i in snps){
 }
 all_snps_sparse <- Matrix(t(all_snps), sparse = TRUE)     
 rm(all_snps); gc()
-sampled_rows <- sample(ncol(all_snps_sparse), 5000000)
-all_snps_sparse_sampled = all_snps_sparse[,sampled_rows]
+
 ##Load SVs
 svs=list.files("/home/zajac/SV_intersects/largeSVs/", pattern = "merged.DEFAULT", full.names = TRUE)[!grepl("annot",list.files("/home/zajac/SV_intersects/largeSVs/", pattern = "merged.DEFAULT", full.names = TRUE))]
 all_svs = NULL
@@ -44,7 +46,6 @@ for (i in svs){
 all_svs_sparse <- Matrix(t(all_svs), sparse = TRUE)  
 rownames(all_svs_sparse) = sapply(str_split(rownames(all_svs_sparse), "_"), .subset, 3)
 rm(all_svs); gc()
-
 
 ##Load Inversions
 invs = read.delim("INVERSIONS/inversions.clustered.0.9proc.mapq.mapc.filtered.txt")
@@ -67,50 +68,102 @@ cat("SV matrix:",  dim(all_svs_sparse),  "\n")
 cat("INV matrix:", dim(all_invs), "\n") 
 
 ##Distance matrices (Jaccard, binary)
-jaccard_sparse <- function(mat_sparse) {
-  co_presence <- as.matrix(mat_sparse %*% t(mat_sparse))   
-  totals <- diag(co_presence)                                
-  n <- nrow(co_presence)
-  d <- matrix(0, n, n)
-  for (i in 1:n) {
-    for (j in 1:n) {
-      union_ij <- totals[i] + totals[j] - co_presence[i, j]
-      d[i, j] <- if (union_ij == 0) 0 else 1 - co_presence[i, j] / union_ij
-    }
-  }
-  rownames(d) <- colnames(d) <- rownames(mat_sparse)
-  as.dist(d)
-}
-
-d_snp <- jaccard_sparse(all_snps_sparse)
-d_sv <- jaccard_sparse(all_svs_sparse)
+d_snp <- vegdist(all_snps_sparse, method = "jaccard", binary = TRUE)
+d_sv <- vegdist(all_svs_sparse, method = "jaccard", binary = TRUE)
 d_inv <- vegdist(all_invs, method = "jaccard", binary = TRUE)
 
-pcoa_snp <- cmdscale(d_snp, k = 2)
-pcoa_sv  <- cmdscale(d_sv,  k = 2)
-pcoa_inv <- cmdscale(d_inv, k = 2)
+##Build trees consistently (NJ is preferable to hclust for cross-marker comparison)
+tr_snp <- nj(d_snp)
+tr_sv  <- nj(d_sv)
+tr_inv <- nj(d_inv)
 
-proc_sv  <- procrustes(pcoa_snp, pcoa_sv)
-proc_inv <- procrustes(pcoa_snp, pcoa_inv)
+##Root NJ trees
+tr_snp$node.label <- as.character((Ntip(tr_snp)+1):(Ntip(tr_snp)+Nnode(tr_snp)))
+tr_snp_r = midpoint.root(tr_snp)
+tr_snp_r <- root(tr_snp_r, node = 17, resolve.root = TRUE)
+tr_sv$node.label <- as.character((Ntip(tr_sv)+1):(Ntip(tr_sv)+Nnode(tr_sv)))
+tr_sv_r  <- midpoint.root(tr_sv)
+tr_sv_r <- root(tr_sv_r, node = 17, resolve.root = TRUE)
+tr_inv$node.label <- as.character((Ntip(tr_inv)+1):(Ntip(tr_inv)+Nnode(tr_inv)))
+tr_inv_r <- midpoint.root(tr_inv)
+tr_inv_r <- root(tr_inv_r, node = 17, resolve.root = TRUE)
+
+##Check tip labels
+tr_snp_r$tip.label = str_replace(sample_data[match(tr_snp_r$tip.label,sample_data$MyName),]$Organism.Name, "Podarcis ", "P. ")
+tr_sv_r$tip.label = str_replace(sample_data[match(tr_sv_r$tip.label,sample_data$MyName),]$Organism.Name, "Podarcis ", "P. ")
+tr_inv_r$tip.label = str_replace(sample_data[match(tr_inv_r$tip.label,sample_data$MyName),]$Organism.Name, "Podarcis ", "P. ")
+
+##Matching the trees
+## SNP vs SV
+pdf("../Figures/SNP_SV_tree.pdf", width = 5, height = 5)
+cophy_snp_sv <- cophylo(tr_snp_r, tr_sv_r, rotate = TRUE)  # rotate=TRUE minimizes crossings
+plot(cophy_snp_sv,
+     link.lwd = 2,
+     link.type = "curved",
+     link.col = "#21908CFF",
+     fsize = 0.8)
+title("SNP tree vs SV tree")
+dev.off()
+
+## SNP vs Inversions
+pdf("../Figures/SNP_INV_tree.pdf", width = 5, height = 5)
+cophy_snp_inv <- cophylo(tr_snp_r, tr_inv_r, rotate = TRUE)
+plot(cophy_snp_inv,
+     link.lwd = 2,
+     link.type = "curved",
+     link.col = "darkorange",
+     fsize = 0.8)
+title("SNP tree vs Inversion tree")
+dev.off()
+
+## SV vs Inversions
+pdf("../Figures/SV_INV_tree.pdf", width = 5, height = 5)
+cophy_sv_inv <- cophylo(tr_sv_r, tr_inv_r, rotate = TRUE)
+plot(cophy_sv_inv,
+     link.lwd = 2,
+     link.type = "curved",
+     link.col = "#440154FF",
+     fsize = 0.8)
+title("SV tree vs Inversion tree")
+dev.off()
+
+##Procrustes on ordinations
+stopifnot(all(rownames(pcoa_snp) %in% rownames(pcoa_sv)))
+stopifnot(all(rownames(pcoa_snp) %in% rownames(pcoa_inv)))
+
+common_order <- rownames(pcoa_snp)          # use SNP tree order as the reference
+pcoa_snp <- pcoa_snp[common_order, ]
+pcoa_sv  <- pcoa_sv[common_order, ]
+pcoa_inv <- pcoa_inv[common_order, ]
+
+proc_snp_sv  <- protest(pcoa_snp, pcoa_sv,  permutations = 999)
+proc_snp_inv <- protest(pcoa_snp, pcoa_inv, permutations = 999)
+rownames(proc_snp_sv$Yrot)  <- common_order
+rownames(proc_snp_inv$Yrot) <- common_order
 
 proc_df <- rbind(
-  data.frame(Species=rownames(pcoa_snp), x=pcoa_snp[,1], y=pcoa_snp[,2], Type="SNP"),
-  data.frame(Species=rownames(proc_sv$Yrot), x=proc_sv$Yrot[,1], y=proc_sv$Yrot[,2], Type="SV"),
-  data.frame(Species=rownames(proc_inv$Yrot), x=proc_inv$Yrot[,1], y=proc_inv$Yrot[,2], Type="INV")
+  data.frame(Species = common_order,
+             x = pcoa_snp[, 1], y = pcoa_snp[, 2], Type = "SNP"),
+  data.frame(Species = common_order,
+             x = proc_snp_sv$Yrot[, 1], y = proc_snp_sv$Yrot[, 2], Type = "SV"),
+  data.frame(Species = common_order,
+             x = proc_snp_inv$Yrot[, 1], y = proc_snp_inv$Yrot[, 2], Type = "INV")
 )
+proc_df$Species <- sample_data$Organism.Name[match(proc_df$Species, sample_data$MyName)]
 
-pD <- ggplot(proc_df, aes(x, y, color=Type, group=Species)) +
-  geom_line(aes(group=Species), color="grey70", alpha=0.5) +
-  geom_point(size=2) +
-  scale_color_manual(values=c("#440154FF","#21908CFF","#FDE725FF")) +
-  theme_minimal(base_size=10) +
-  labs(title="Procrustes-aligned ordination", x="PCo1", y="PCo2") + 
-  geom_text(aes(label = Species))
+pD <- ggplot(proc_df, aes(x, y, color = Type, group = Species)) +
+  geom_line(color = "grey70", alpha = 0.5) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("#440154FF", "#21908CFF", "darkorange")) +
+  theme_bw(base_size = 10) +
+  labs(title = "Procrustes-aligned ordination", x = "PCo1", y = "PCo2") +
+  geom_text_repel(aes(label = Species), size = 3, max.overlaps = 20, show.legend = FALSE)
 
-pD$data$Species = sample_data[match(pD$data$Species, sample_data$MyName),]$Organism.Name
+pdf("../Figures/SV_INV_SV_procrustes.pdf", height = 7, width = 11)
+pD
+dev.off()
 
-
-##Mantel test 
+##Mantel test visualised in a heatmap
 mantel_snp_sv  <- mantel(d_snp, d_sv,  permutations = 999)
 mantel_snp_inv <- mantel(d_snp, d_inv, permutations = 999)
 mantel_sv_inv  <- mantel(d_sv,  d_inv, permutations = 999)
@@ -120,26 +173,37 @@ mantel_results <- data.frame(
   p = c(mantel_snp_sv$signif,    mantel_snp_inv$signif,    mantel_sv_inv$signif)
 )
 mantel_results$p_adj <- p.adjust(mantel_results$p, method = "fdr")
-print(mantel_results)
 
-##Tanglegrams
-d_snp_euc = dist(all_snps_sparse_sampled, method = "binary")
-d_inv_euc = dist(all_invs, method = "binary")
-d_svs_euc = dist(all_svs_sparse, method = "binary")
-dend_snp <- as.dendrogram(hclust(d_snp_euc, "ward.D"))
-dend_sv  <- as.dendrogram(hclust(d_svs_euc,  "ward.D"))
-dend_inv <- as.dendrogram(hclust(d_inv_euc, "ward.D"))
+congruence_mat <- matrix(
+  c(NA, mantel_snp_sv$statistic, mantel_snp_inv$statistic,
+    mantel_snp_sv$statistic, NA, mantel_sv_inv$statistic,
+    mantel_snp_inv$statistic, mantel_sv_inv$statistic, NA),
+  nrow = 3, dimnames = list(c("SNP","SV","INV"), c("SNP","SV","INV"))
+)
 
-dend_snp <- as.dendrogram(as.dist(d_snp) %>% hclust())
-dend_sv  <-as.dendrogram(as.dist(d_sv) %>% hclust())
-dend_inv <-as.dendrogram(as.dist(d_inv) %>% hclust())
+pdf("../Figures/SV_INV_SV_mantel.pdf", height = 5, width = 7)
+pheatmap(congruence_mat, cluster_rows = FALSE, cluster_cols = FALSE,
+         display_numbers = TRUE, color = viridis(50), na_col = "white",
+         main = "Mantel r between marker-type distance matrices")
+dev.off()
 
-tanglegram(dend_snp, dend_sv, main_left = "SNP", main_right = "SV",
-           highlight_distinct_edges = TRUE, common_subtrees_color_lines = TRUE,
-           lwd = 1.5, columns_width = c(4, 2, 4))
-tanglegram(dend_snp, dend_inv, main_left = "SNP", main_right = "Inversion",
-           highlight_distinct_edges = TRUE, common_subtrees_color_lines = TRUE,
-           lwd = 1.5, columns_width = c(4, 2, 4))
-tanglegram(dend_sv, dend_inv, main_left = "SNP", main_right = "Inversion",
-           highlight_distinct_edges = TRUE, common_subtrees_color_lines = TRUE,
-           lwd = 1.5, columns_width = c(4, 2, 4))
+##Objectively choose linkage via cophenetic correlation
+methods <- c("single", "complete", "average", "ward.D2")
+
+pick_method <- function(d) {
+  cors <- sapply(methods, function(m) cor(d, cophenetic(hclust(d, method = m))))
+  names(sort(cors, decreasing = TRUE))[1]
+}
+
+best_snp <- pick_method(d_snp)
+best_sv  <- pick_method(d_sv)
+best_inv <- pick_method(d_inv)
+best_snp; best_sv; best_inv   #Chek
+
+##Build tanglegrams
+dend_snp <- as.dendrogram(hclust(d_snp, method = best_snp))
+dend_sv  <- as.dendrogram(hclust(d_sv,  method = best_sv))
+dend_inv <- as.dendrogram(hclust(d_inv, method = best_inv))
+
+tanglegram(dend_snp, dend_sv,  main_left = "SNP", main_right = "SV")
+tanglegram(dend_snp, dend_inv, main_left = "SNP", main_right = "INV")

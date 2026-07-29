@@ -1,0 +1,949 @@
+---
+title: "WFMASH/PGGB result evaluation"
+author: "Natalia Zajac"
+date: "01/09/2025"
+output:
+  html_document: 
+    highlight: pygments
+    theme: sand
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r include=FALSE}
+knitr::opts_chunk$set(
+  comment = '', fig.width = 8, fig.height = 8, warning = FALSE, error = FALSE
+)
+```
+
+```{r setup, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+library(pafr)
+library(utils)
+library(dplyr)
+library(tidyverse)
+library(reshape2)
+library(cowplot)
+library(patchwork)
+library(ezRun)
+library(ggbeeswarm)
+library(data.table)
+library(parallel)
+library(vcfppR)
+library(DT)
+library(data.table)
+
+inputdir= "../pggb_allcommunities/BUSCOS/"
+
+all_similiarity = NULL
+for (i in list.files(inputdir, pattern = "similarity.txt", recursive = TRUE)) {
+  s=sapply(str_split(i, "\\."), .subset, 3)
+  com = sapply(str_split(i, "\\."), .subset, 1)
+  df = fread(paste0(inputdir,i))
+  df = df[df$chrom != "chrom",]
+  df$community = com
+  df$s = s
+  all_similiarity = rbind(all_similiarity, df)
+}
+all_similiarity = split(all_similiarity, all_similiarity$s)
+buscosdf = read_delim("/home/zajac/BUSCO/shared_single_copy_orthologs.txt", delim = "\t", quote = "none")
+
+#Give all buscos an ID
+all_similiarity = mclapply(all_similiarity, mc.cores = 4, function(x){merge(data.frame(x), buscosdf[grepl("rPodVau1#1",buscosdf$genome),], by.x = c("chrom", "start", "end"), by.y = c("genome", "start", "end"), all.x = TRUE)})
+
+#Convert to granges
+all_similiarity = mclapply(all_similiarity, mc.cores = 4, function(x){
+  x$genome = sapply(str_split(x$group.a, ":"),.subset, 1)
+  x$start1 = as.numeric(sapply(str_split(sapply(str_split(x$group.a, ":"),.subset, 2), "-"), .subset, 1))
+  x$end1 = as.numeric(sapply(str_split(sapply(str_split(x$group.a, ":"),.subset, 2), "-"), .subset, 2))
+  return(x)
+})
+
+gr_all_similiarity = mclapply(all_similiarity, mc.cores = 10,function(x){
+  makeGRangesFromDataFrame(x[,c(16,17,18)] %>% unique() %>% dplyr::rename(start = start1, end = end1), seqnames.field = "genome")
+})
+
+#Keep only BUSCOs you checked an alignment for and convert to granges
+buscosdf = buscosdf[buscosdf$Busco %in% unique(c(all_similiarity$s10000$Busco, all_similiarity$s5000$Busco)),]
+buscodf = makeGRangesFromDataFrame(buscosdf[,c(2,3,4)], seqnames.field = "genome")
+
+#Compute overlap and build results table
+results <- mclapply(gr_all_similiarity, mc.cores = 15, function(x) {
+  hits = findOverlaps(x, buscodf)
+  query_hits   <- x[queryHits(hits)]
+  subject_hits <- buscodf[subjectHits(hits)]
+  overlaps <- pintersect(query_hits, subject_hits)
+  overlap_lengths <- GenomicRanges::width(overlaps)
+  result <- data.frame(
+  query_seqname   = as.character(seqnames(query_hits)),
+  query_start     = start(query_hits),
+  query_end       = end(query_hits),
+  subject_seqname = as.character(seqnames(subject_hits)),
+  subject_start   = start(subject_hits),
+  subject_end     = end(subject_hits),
+  overlap_start   = start(overlaps),
+  overlap_end     = end(overlaps),
+  overlap_length  = overlap_lengths
+  ) %>% unique()
+  return(result)
+})
+
+
+#Combine all alignments per genome per chromosome into one if split
+
+results = lapply(results, function(x) {x %>% 
+  group_by(subject_seqname, subject_start, subject_end) %>% 
+  summarise(query_seqname = unique(query_seqname), 
+            query_start = min(query_start), 
+            query_end = max(query_end), 
+            overlap_start = min(overlap_start), 
+            overlap_end = max(overlap_end), 
+            overlap_length = sum(overlap_length))})
+
+#Add an ID to each BUSCO and add those not found in paf alignments
+
+results = lapply(results, function(x){
+  x = merge(x, buscosdf, by.x = c("subject_seqname" ,"subject_start", "subject_end"), by.y = c("genome", "start", "end"), all = TRUE) %>% 
+    unique() %>% 
+    mutate(overlap_length = if_else(is.na(overlap_length), 0, overlap_length),
+           overlap_start = if_else(is.na(overlap_start), 0, overlap_start),
+          overlap_end = if_else(is.na(overlap_end), 0, overlap_end),
+          subject_length = subject_end -  subject_start,
+          chromosome = sapply(str_split(subject_seqname, "#"), .subset, 3),
+          genome = paste0(sapply(str_split(subject_seqname, "#"), .subset, 1), "#", sapply(str_split(subject_seqname, "#"), .subset, 2)),
+          perc = (overlap_length * 100)/subject_length)
+  return(x)
+  })
+         
+
+all_results = bind_rows(results, .id = "Sparam")
+```
+
+# WFMASH/PGGB result evaluation for an optimal set of parameters
+
+## 1. Summary of selected BUSCOs
+
+```{r, fig.height=7, fig.width=8, echo=FALSE, message=FALSE, warning=FALSE}
+x = buscosdf %>% separate(genome, into = c("species", "haplotype", "chromosome"), sep = "#") %>% group_by(chromosome) %>% summarise(value = n_distinct(Busco))  
+x$chromosome = factor(x$chromosome, levels = c(seq(1,18,1), "Z"))
+x %>% ggplot(aes(chromosome, value)) + geom_col(fill = "lightgrey", colour = "black") + theme_minimal_grid() + labs(y = "Number of single copy BUSCO genes")
+
+pdf("../Figures/BUSCOs_per_chr.pdf", width = 10, height = 4)
+x %>% ggplot(aes(chromosome, value)) + geom_col(fill = "lightgrey", colour = "black") + theme_minimal_grid() + labs(y = "Number of single copy BUSCO genes")
+dev.off()
+```
+
+## 2. Coverage of BUSCO Sequences by PAF Alignments {.tabset}
+
+### Quick summary
+
+```{r, fig.height=7, fig.width=8, echo=FALSE, message=FALSE, warning=FALSE}
+
+p1 = rbind(all_results[all_results$perc > 80 & all_results$Sparam != "s1000",] %>% group_by(genome, Busco, Sparam) %>% summarise(n()) %>% group_by(Busco, Sparam) %>% summarise(n_distinct(genome)) %>% filter(`n_distinct(genome)` > 20) %>% group_by(Sparam) %>% summarise(value = n_distinct(Busco)) %>% mutate(category = "min. 80% overlap with BUSCO for 80% of species"), all_results[all_results$perc == 0 & all_results$Sparam != "s1000",] %>% group_by(genome, Busco, Sparam) %>% summarise(n()) %>% group_by(Busco, Sparam) %>% summarise(n_distinct(genome)) %>% filter(`n_distinct(genome)` > 20) %>% group_by(Sparam) %>% summarise(value = n_distinct(Busco)) %>% mutate(category = "missing in min. 80% of species")) %>% ggplot(aes(category, value, fill = Sparam)) + geom_col(position = "dodge") + theme_bw() + scale_y_log10() + geom_text_repel(aes(label = value))
+
+pdf("../Figures/BUSCO_results.paf.pdf", width = 10, height = 4)
+p1
+dev.off()
+```
+
+### 2A. All.
+
+```{r, fig.height=7, fig.width=8, echo=FALSE, message=FALSE, warning=FALSE}
+all_results[!grepl("Z",all_results$subject_seqname) & !grepl("#13", all_results$subject_seqname),] %>% ggplot(aes(perc, fill = Sparam)) + geom_histogram(position = "dodge") + xlab("Absent from PAF           Sequence not fully covered.           Sequence fully covered.         Sequences covered by multiple alignments") + ylab("Number of sequences") + theme(axis.title.x = element_text(size = 9)) 
+```
+
+### 2B. By chromosome.
+
+```{r, fig.height=15, fig.width=15, echo=FALSE, message=FALSE, warning=FALSE}
+all_results %>% ggplot(aes(perc, fill = Sparam)) + geom_histogram(position = "dodge") + xlab("Absent from PAF (0)                    Sequence not fully covered. (<100)                     Sequence fully covered. (100)               Sequences covered by multiple alignments (>100)") + ylab("Number of sequences") + facet_wrap(~chromosome, scales = "free") + theme(axis.title.x = element_text(size = 13))
+```
+
+### 2C. By Genome.
+
+```{r, fig.height=15, fig.width=15}
+all_results %>% ggplot(aes(perc, fill = Sparam)) + geom_histogram(position = "dodge") + xlab("Absent from PAF (0)                    Sequence not fully covered. (<100)                     Sequence fully covered. (100)               Sequences covered by multiple alignments (>100)") + ylab("Number of sequences") + facet_wrap(~genome, scales = "free") + theme(axis.title.x = element_text(size = 13))
+```
+
+### 2D. By Genome By Chromosome.
+
+```{r, fig.height=15, fig.width=15}
+for (i in c(seq(1,18,1),"Z")){
+  print(all_results %>% filter(chromosome == i) %>% ggplot(aes(perc, fill = Sparam)) + geom_histogram(position = "dodge") + xlab("Absent from PAF (0)                    Sequence not fully covered. (<100)                     Sequence fully covered. (100)               Sequences covered by multiple alignments (>100)") + ylab("Number of sequences") + facet_wrap(~genome, scales = "free_y") + theme(axis.title.x = element_text(size = 13)) + ggtitle(paste("Chromsome", i)))
+}
+```
+
+### 2E. General statistics regarding BUSCO groups.
+
+```{r, fig.height=11, fig.width=18}
+all_results$perc_binned = ezCut(all_results$perc, breaks = c(0,20,80, 99,105, 120,180,200))
+
+all_results %>% 
+  group_by(Busco, perc_binned, Sparam) %>% 
+  summarise(nb_genomes = n_distinct(genome)) %>% 
+  group_by(perc_binned, nb_genomes, Sparam) %>% 
+  summarise(nb_buscos = n_distinct(Busco)) %>% 
+  ggplot(aes(nb_buscos, factor(as.character(nb_genomes), levels = c(seq(1,26,1))), fill = Sparam)) + 
+  geom_col(position = "dodge") + 
+  facet_grid(~perc_binned, scales = "free") + 
+  ylab("Number of genomes")
+```
+
+```{r, fig.height=11, fig.width=18}
+all_results$chromosome = factor(all_results$chromosome, levels = c(seq(1,18,1), "Z"))
+merge(all_results %>% group_by(Busco, perc_binned, chromosome, Sparam) %>% 
+        summarise(nb_genomes = n_distinct(genome)) %>% 
+        filter(perc_binned %in% c("(80 - 99]", "(99 - 105]", "(105 - 120]", "(120 - 180]", "(180 - 200]", "> 200")) %>% 
+        group_by(chromosome, Busco, Sparam) %>% 
+        summarise(sum(nb_genomes)) %>% 
+        filter(`sum(nb_genomes)` == 26) %>% 
+        group_by(chromosome, Sparam) %>% 
+        summarise(totally_covered = n_distinct(Busco)), 
+      all_results %>% group_by(chromosome, Sparam) %>% 
+        summarise(total = n_distinct(Busco)), by = c("chromosome", "Sparam")) %>% 
+  mutate(totally_covered_busco_groups = (totally_covered*100)/total) %>% 
+  ggplot(aes(chromosome, totally_covered_busco_groups,fill = Sparam)) + 
+  geom_col(position = "dodge") + 
+  labs( x = "chromosome", y = "% Busco groups with all 26 species covered in at least 80% in PAF") + 
+  theme(text = element_text(size = 14))
+```
+
+```{r, fig.height=11, fig.width=18}
+
+merge(all_results %>% group_by(Busco, perc_binned, chromosome, Sparam) %>% 
+        summarise(nb_genomes = n_distinct(genome)) %>% 
+        filter(perc_binned %in% c("(80 - 99]", "(99 - 105]", "(105 - 120]", "(120 - 180]", "(180 - 200]", "> 200")) %>% 
+        group_by(chromosome, Busco, Sparam) %>% 
+        summarise(sum(nb_genomes)) %>% 
+        filter(`sum(nb_genomes)` >= 25) %>% 
+        group_by(chromosome, Sparam) %>% 
+        summarise(totally_covered = n_distinct(Busco)), 
+      all_results %>% group_by(chromosome, Sparam) %>% 
+        summarise(total = n_distinct(Busco)), by = c("chromosome", "Sparam")) %>% 
+  mutate(totally_covered_busco_groups = (totally_covered*100)/total) %>% 
+  ggplot(aes(chromosome, totally_covered_busco_groups,fill = Sparam)) + 
+  geom_col(position = "dodge") + 
+  labs( x = "chromosome", y = "% Busco groups with 25 or more species covered in at least 80% in PAF") + 
+  theme(text = element_text(size = 14))
+
+```
+
+```{r, fig.height=11, fig.width=18}
+
+merge(all_results %>% group_by(Busco, perc, chromosome, Sparam) %>% 
+    summarise(nb_genomes = n_distinct(genome)) %>% 
+    filter(perc >= 80) %>% 
+    group_by(chromosome, Busco, Sparam) %>% 
+    summarise(sum(nb_genomes)) %>% mutate(expected_genomes = if_else(chromosome == "Z", 15, 26)) %>% mutate(perc_genomes = (`sum(nb_genomes)` * 100)/expected_genomes) %>% 
+    filter(perc_genomes >= 80) %>% 
+    group_by(chromosome, Sparam) %>% 
+    summarise(totally_covered = n_distinct(Busco)), 
+    all_results %>% group_by(chromosome, Sparam) %>% 
+        summarise(total = n_distinct(Busco)), by = c("chromosome", "Sparam")) %>% 
+    mutate(totally_covered_busco_groups = (totally_covered*100)/total) %>% 
+    ggplot(aes(totally_covered_busco_groups,chromosome,fill = Sparam)) + 
+    geom_col(position = "dodge") + 
+    labs( x = "% BUSCO groups (≥80% genomes, ≥80% overlap)", y = "Chromosome", fill = "Mapping Segment Length") + theme_bw() + 
+    theme(text = element_text(size = 14), legend.position = "top") + scale_x_continuous(breaks = c(0,20,40,60,80,100))
+
+```
+
+```{r, fig.height=11, fig.width=18}
+
+merge(all_results %>% filter(perc > 80) %>% group_by(genome, Sparam) %>% summarise(n_distinct(Busco)), 
+      all_results %>% group_by(genome, Sparam) %>% 
+          summarise(total = n_distinct(Busco)), by = c("genome", "Sparam"))%>% 
+    mutate(totally_covered_busco_groups = (`n_distinct(Busco)`*100)/total) %>% ggplot(aes( totally_covered_busco_groups,genome,fill = Sparam)) + 
+    geom_col(position = "dodge") + 
+    labs( y = "genome", x = "% Busco groups with each species covered in at least 80% in PAF") + 
+    theme(text = element_text(size = 14))
+
+
+```
+
+## 3. Misalignments from the pafs
+
+```{r, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+
+results <- mclapply(gr_all_similiarity, mc.cores = 15, function(x) {
+  hits = findOverlaps(x, buscodf)
+  query_hits   <- x[queryHits(hits)]
+  subject_hits <- buscodf[subjectHits(hits)]
+  overlaps <- pintersect(query_hits, subject_hits)
+  overlap_lengths <- width(overlaps)
+  result <- data.frame(
+  query_seqname   = as.character(seqnames(query_hits)),
+  query_start     = start(query_hits),
+  query_end       = end(query_hits),
+  subject_seqname = as.character(seqnames(subject_hits)),
+  subject_start   = start(subject_hits),
+  subject_end     = end(subject_hits),
+  overlap_start   = start(overlaps),
+  overlap_end     = end(overlaps),
+  overlap_length  = overlap_lengths
+  ) %>% unique()
+  return(result)
+})
+
+pafs = NULL
+for (i in c("s1000", "s5000", "s10000")){
+  paf = merge(results[[i]], 
+      all_similiarity[[i]][,c(15,16,17,18)] %>% unique(), 
+      by.x = c("query_seqname" ,"query_start", "query_end"), 
+      by.y = c("genome", "start1", "end1"), all = TRUE) %>% 
+  unique() %>%
+  mutate(chromosome = sapply(str_split(query_seqname, "#"), .subset, 3),
+         genome = paste0(sapply(str_split(query_seqname, "#"), .subset, 1), "#", sapply(str_split(query_seqname, "#"), .subset, 2)),
+         query_length = query_end - query_start)
+  pafs[[i]] = paf
+}
+all_pafs = bind_rows(pafs, .id = "Sparam")
+
+all_pafs$chromosome = factor(all_pafs$chromosome, levels = c(seq(1,18,1), "Z"))
+```
+
+### 3A. All.
+
+```{r, fig.height=7, fig.width=8}
+all_pafs[is.na(all_pafs$subject_seqname),] %>% 
+  group_by(Busco,Sparam) %>% 
+  summarise(alignments_out_of_busco_bounds = n_distinct(paste0(query_seqname, query_start, query_end))) %>% 
+  ggplot(aes(alignments_out_of_busco_bounds, fill = Sparam)) + geom_histogram(position = "dodge") + labs(y = "Number of BUSCO groups")
+```
+
+```{r, fig.height=7, fig.width=8}
+all_pafs[is.na(all_pafs$subject_seqname),] %>% 
+  ggplot(aes(query_length/1000, fill = Sparam)) + 
+  geom_histogram(position = "dodge") + 
+  labs(x = "Length of alignment (Kb)") + 
+  scale_x_continuous(breaks = seq(1,30,1))
+```
+
+### 3B. By Chromosome.
+
+```{r, fig.height=15, fig.width=15}
+
+all_pafs[is.na(all_pafs$subject_seqname),] %>% 
+    group_by(Busco, chromosome,Sparam) %>% 
+    summarise(alignments_out_of_busco_bounds = n_distinct(paste0(query_seqname, query_start, query_end))) %>% 
+    ggplot(aes(alignments_out_of_busco_bounds, fill = Sparam)) + geom_histogram(position = "dodge") + labs(y = "Number of BUSCO groups") + 
+  facet_wrap(~chromosome)
+
+```
+
+```{r, fig.height=15, fig.width=15}
+
+all_pafs[is.na(all_pafs$subject_seqname),] %>% 
+    group_by(Busco, chromosome,Sparam) %>% 
+    summarise(alignments_out_of_busco_bounds = n_distinct(paste0(query_seqname, query_start, query_end))) %>% 
+  group_by(Sparam, chromosome) %>% summarise(sum(alignments_out_of_busco_bounds)) %>% 
+  ggplot(aes(chromosome,`sum(alignments_out_of_busco_bounds)`, fill = Sparam)) + geom_col(position = "dodge")
+
+```
+
+```{r, fig.height=15, fig.width=15}
+
+all_pafs[is.na(all_pafs$subject_seqname),] %>% 
+  ggplot(aes(query_length/1000, fill = Sparam)) + 
+  geom_histogram(position = "dodge") + 
+  labs(x = "Length of alignment (Kb)") + 
+  scale_x_continuous(breaks = seq(1,30,1)) +
+  facet_wrap(~chromosome)
+
+```
+
+### 3C. By Genome.
+
+```{r, fig.height=15, fig.width=15, echo=FALSE, message=FALSE, warning=FALSE}
+
+all_pafs[is.na(all_pafs$subject_seqname),] %>% 
+    group_by(Busco, genome, Sparam) %>% 
+    summarise(alignments_out_of_busco_bounds = n_distinct(paste0(query_seqname, query_start, query_end))) %>% 
+    ggplot(aes(alignments_out_of_busco_bounds, fill = Sparam)) + geom_histogram(position = "dodge") + labs(y = "Number of BUSCO groups") + 
+  facet_wrap(~genome)
+
+```
+
+```{r, fig.height=15, fig.width=15}
+
+all_pafs[is.na(all_pafs$subject_seqname),] %>% 
+    group_by(Busco, genome,Sparam) %>% 
+    summarise(alignments_out_of_busco_bounds = n_distinct(paste0(query_seqname, query_start, query_end))) %>% 
+  group_by(Sparam, genome) %>% 
+  summarise(sum(alignments_out_of_busco_bounds)) %>% 
+  ggplot(aes(genome,`sum(alignments_out_of_busco_bounds)`, fill = Sparam)) + geom_col(position = "dodge")
+
+```
+
+```{r, fig.height=15, fig.width=15}
+
+all_pafs[is.na(all_pafs$subject_seqname),] %>% 
+  ggplot(aes(query_length/1000, fill = Sparam)) + 
+  geom_histogram(position = "dodge") + 
+  labs(x = "Length of alignment (Kb)") + 
+  scale_x_continuous(breaks = seq(1,30,1)) +
+  facet_wrap(~genome)
+
+```
+
+## 4. Assess the level of fragmentation of BUSCO alignments
+
+```{r, fig.height=10, fig.width=15, echo=FALSE, message=FALSE, warning=FALSE}
+
+results = lapply(results, function(x){
+  x = merge(x, buscosdf, by.x = c("subject_seqname" ,"subject_start", "subject_end"), by.y = c("genome", "start", "end"), all = TRUE) %>%
+    unique() %>%
+    mutate(overlap_length = if_else(is.na(overlap_length), 0, overlap_length),
+           overlap_start = if_else(is.na(overlap_start), 0, overlap_start),
+          overlap_end = if_else(is.na(overlap_end), 0, overlap_end),
+          subject_length = subject_end -  subject_start,
+          chromosome = sapply(str_split(subject_seqname, "#"), .subset, 3),
+          genome = paste0(sapply(str_split(subject_seqname, "#"), .subset, 1), "#", sapply(str_split(subject_seqname, "#"), .subset, 2)),
+          perc = (overlap_length * 100)/subject_length)
+  return(x)
+  })
+
+results1 = lapply(results, function(x) {x %>% group_by(Busco,chromosome) %>% summarise(sequences = n_distinct(paste0(query_seqname, query_start, query_end)))})
+results1 = bind_rows(results1, .id = "Sparam")
+
+p1 = ggplot(results1, aes(sequences, color = Sparam)) + geom_density() + labs(color = "S-param", x = "Number of sequences per BUSCO", y = "density") + facet_wrap(~chromosome, ncol = 5, scales = "free")
+p2 = ggplot(results1, aes(chromosome, sequences, fill = Sparam)) + geom_boxplot() + labs(x = "S-param",y = "Number of sequences per BUSCO") + geom_hline(yintercept = 26) + geom_hline(yintercept = 15)
+
+p1
+p2
+```
+
+## 5. Length of chromosomes
+
+```{r, fig.height=15, fig.width=15, echo=FALSE, message=FALSE, warning=FALSE}
+all = NULL
+for (i in list.files("../chromosome_sets/", pattern = "combined.fasta.fai", recursive = T)){
+  df = read.delim(paste0("../chromosome_sets/",i), header = F)
+  df$chromosome = sapply(str_split(df$V1, "#"), .subset, 3)
+  all =  rbind(all , df)
+}
+all %>% ggplot(aes(V1, V2)) + geom_col() + facet_wrap(~chromosome, scales = "free") + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1))
+```
+
+## 6. Statistics from graphs
+
+```{r, include=FALSE}
+
+plots= NULL
+plots[["samples"]] = NULL
+plots[["paths"]] = NULL
+sizes = NULL
+for (i in seq(0,18,1)){
+  comm = paste0("community",i)
+  spstats1 = read.delim(paste0("../pggb_allcommunities/community",i, ".s10000/community",i, ".sorted.stats"), sep = "\t", header = F,skip = 2)[1:15,]
+  colnames(spstats1) = c("sample", "core", "private", "shell")
+  spstats1$s = "s10000"
+  spstats2 = read.delim(paste0("../pggb_allcommunities/community",i, ".s5000/community",i, ".sorted.stats"), sep = "\t", header = F,skip = 2)[1:15,]
+  colnames(spstats2) = c("sample", "core", "private", "shell")
+  spstats2$s = "s5000"
+  species = spstats1 %>% mutate(total = as.numeric(private) + as.numeric(shell)) %>% arrange(as.numeric(total)) %>% dplyr::select(sample) %>% as.list()
+  
+  community=paste0("community",i)
+  chromosome = unique(sapply(str_split(read.delim(paste0("../chromosome_sets/", community, "_unmasked/", community, ".combined.fasta.fai"), header = F)$V1, "#"), .subset, 3))
+  
+  spstats = rbind(spstats1,spstats2)  
+  spstats = reshape2::melt(spstats, id.vars = c("sample", "s"))
+  spstats$sample = factor(spstats$sample, levels = species$sample)
+  p1 = spstats %>% ggplot(aes(sample, as.numeric(value) , fill = factor(variable, levels = c("private", "shell", "core")))) + geom_col(position = "stack") + labs(x = "species", y = "Sequence counts (bp)", fill = "PG Sequence Class") + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1)) + ggtitle(chromosome) + facet_grid(~s)
+  plots[["samples"]][[comm]] = p1
+
+  pgstats1 = read.delim(paste0("../pggb_allcommunities/community",i, ".s10000/community",i, ".sorted.stats"), sep = "\t", header = T,skip = 18)
+  nodes1=read.delim(paste0("../pggb_allcommunities/community",i, ".s10000/community",i, ".sorted.stats"), sep = "\t", header = T)[1,]$nodes
+  pgstats1$perc_visited_nodes = round((pgstats1$nodes * 100)/as.numeric(nodes1),1)
+  pgstats1$s = "s10000"
+  pgstats2 = read.delim(paste0("../pggb_allcommunities/community",i, ".s5000/community",i, ".sorted.stats"), sep = "\t", header = T,skip = 18)
+  nodes2=read.delim(paste0("../pggb_allcommunities/community",i, ".s5000/community",i, ".sorted.stats"), sep = "\t", header = T)[1,]$nodes
+  pgstats2$perc_visited_nodes = round((pgstats2$nodes * 100)/as.numeric(nodes2),1)
+  pgstats2$s = "s5000"
+  pgstats = rbind(pgstats1, pgstats2)
+  
+  p2 = ggplot(pgstats[c(-27, -54),], aes(path, perc_visited_nodes, fill = s)) + geom_col(position = "dodge") + labs(x = "path", y= "Total nodes visited %") + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1)) + ggtitle(chromosome)
+  plots$paths[[comm]] = p2
+  
+  size1 = read.delim(paste0("../pggb_allcommunities/community",i, ".s10000/community",i, ".sorted.stats"), sep = "\t", header = T)[1,]$X.length
+  size2 = read.delim(paste0("../pggb_allcommunities/community",i, ".s5000/community",i, ".sorted.stats"), sep = "\t", header = T)[1,]$X.length
+  mean_chr_size =  mean(read.delim(paste0("../chromosome_sets/", community, "_unmasked/", community, ".combined.fasta.fai"), header = F)$V2)
+  
+  sizes = rbind(sizes, data.frame("community" = community, "size" = c(size1, size2), "s" = c("s10000", "s5000"), "increase_in_size" = c(as.numeric(size1)/as.numeric(mean_chr_size),as.numeric(size2)/as.numeric(mean_chr_size)),"chromosome" = chromosome))
+  
+}
+
+```
+
+### 6A. pangenome sequence class counts.
+
+```{r, fig.height=15, fig.width=25, echo=FALSE, message=FALSE, warning=FALSE}
+wrap_plots(plots$samples) + plot_layout(guides = "collect")
+```
+
+### 6B. path stats
+
+```{r, fig.height=15, fig.width=15, echo=FALSE, message=FALSE, warning=FALSE}
+wrap_plots(plots$paths) + plot_layout(guides = "collect")
+```
+
+### 6C. graph size - compression ratio
+
+```{r, fig.height=8, fig.width=5, echo=FALSE, message=FALSE, warning=FALSE}
+sizes$chromosome = factor(sizes$chromosome, levels = c(seq(1,18,1), "Z"))
+sizes %>% ggplot(aes(increase_in_size, chromosome, fill = s)) + geom_col(position = "dodge") + labs(y = "chromosome",x = "Size of the graph/mean size of chromosome")
+```
+
+## 7. Variants
+
+### 7A. Number of variants
+
+#### SVs
+
+```{r, fig.height=10, fig.width=15, echo=FALSE, message=FALSE, warning=FALSE}
+library(vcfR)
+library(Biostrings)
+
+#minimgraph = read.vcfR("../minigraph/community16/community16.graph.waved.norm.SV.vcf.gz")
+
+variants_per_sparam = NULL
+for (i in  list.files("../pggb_allcommunities/community16.s1000/", pattern = "SV.vcf$")){
+  tmp = NULL
+  for (x in c("s1000", "s5000", "s10000")){
+    pggb_1=read.vcfR(paste0("../pggb_allcommunities/community16.", x, "/", i))
+    pggb_1 = cbind(data.frame(pggb_1@fix), data.frame(pggb_1@gt)) %>% 
+      mutate(ALTLEN = nchar(ALT), REFLEN=nchar(REF)) %>% 
+      separate(INFO, into = c("LEN", "TYPE"), sep = ";") %>% 
+      mutate(LEN = dplyr::if_else(is.na(LEN), paste0("LEN=", abs(REFLEN- ALTLEN)), LEN)) %>% 
+      mutate(TYPE = case_when(is.na(TYPE) & REFLEN > ALTLEN ~ "TYPE=del", is.na(TYPE) & REFLEN < ALTLEN ~ "TYPE=ins", is.na(TYPE) & REFLEN==ALTLEN ~ "TYPE=complex", .default = TYPE))
+    pggb_1$Sparam = x
+    tmp = rbind(tmp, pggb_1)
+    }
+  tmp$genome = str_remove(str_remove(i, "community16."), ".pggb.waved.norm.SV.vcf")
+  colnames(tmp) = c("CHROM", "POS","ID", "REF", "ALT", "QUAL", "FILTER", "LEN", "TYPE", "FORMAT", "SampleGT", "ALTLEN", "REFLEN", "Sparam", "genome")
+  variants_per_sparam = rbind(tmp, variants_per_sparam)
+}
+
+variants_per_sparam %>% group_by(TYPE, genome, Sparam) %>% summarise(Vars = n_distinct(POS)) %>% ggplot(aes(genome, Vars, fill = Sparam)) + geom_col(position = "dodge") + facet_wrap(~TYPE, scales = "free") + theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1))
+
+```
+
+#### MNPs
+
+```{r, fig.height=10, fig.width=15, echo=FALSE, message=FALSE, warning=FALSE}
+
+variants_per_sparam_MNP = NULL
+for (i in  list.files("../pggb_allcommunities/community16.s1000/", pattern = "MNP.vcf$")){
+  tmp = NULL
+  for (x in c("s1000", "s5000")){
+    pggb_1=read.vcfR(paste0("../pggb_allcommunities/community16.", x, "/", i))
+    pggb_1 = cbind(data.frame(pggb_1@fix), data.frame(pggb_1@gt)) %>% 
+      mutate(ALTLEN = nchar(ALT), REFLEN=nchar(REF)) %>% 
+      separate(INFO, into = c("LEN", "TYPE"), sep = ";") %>% 
+      mutate(LEN = dplyr::if_else(is.na(LEN), paste0("LEN=", abs(REFLEN- ALTLEN)), LEN)) %>% 
+      mutate(TYPE = case_when(is.na(TYPE) & REFLEN > ALTLEN ~ "TYPE=del", is.na(TYPE) & REFLEN < ALTLEN ~ "TYPE=ins", is.na(TYPE) & REFLEN==ALTLEN ~ "TYPE=complex", .default = TYPE))
+    pggb_1$Sparam = x
+    tmp = rbind(tmp, pggb_1)
+    }
+  tmp$genome = str_remove(str_remove(i, "community16."), ".pggb.waved.norm.MNP.vcf")
+  colnames(tmp) = c("CHROM", "POS","ID", "REF", "ALT", "QUAL", "FILTER", "LEN", "TYPE", "FORMAT", "SampleGT", "ALTLEN", "REFLEN", "Sparam", "genome")
+  variants_per_sparam_MNP = rbind(tmp, variants_per_sparam_MNP)
+}
+
+variants_per_sparam_MNP %>% group_by(TYPE, genome, Sparam) %>% summarise(Vars = n_distinct(POS)) %>% ggplot(aes(genome, Vars, fill = Sparam)) + geom_col(position = "dodge") + facet_wrap(~TYPE, scales = "free") + theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1))
+
+```
+
+#### SNPs
+
+```{r, fig.height=10, fig.width=15, echo=FALSE, message=FALSE, warning=FALSE}
+
+variants_per_sparam_SNP = NULL
+for (i in  list.files("../pggb_allcommunities/community16.s1000/", pattern = "SNP.vcf$")){
+  tmp = NULL
+  for (x in c("s1000", "s5000", "s10000")){
+    pggb_1=read.vcfR(paste0("../pggb_allcommunities/community16.", x, "/", i))
+    pggb_1 = cbind(data.frame(pggb_1@fix), data.frame(pggb_1@gt)) %>% 
+      mutate(ALTLEN = nchar(ALT), REFLEN=nchar(REF)) %>% 
+      separate(INFO, into = c("LEN", "TYPE"), sep = ";")
+    pggb_1$TYPE == "TYPE=snp"
+    pggb_1$Sparam = x
+    tmp = rbind(tmp, pggb_1)
+    }
+  tmp$genome = str_remove(str_remove(i, "community16."), ".pggb.waved.norm.SNP.vcf")
+  colnames(tmp) = c("CHROM", "POS","ID", "REF", "ALT", "QUAL", "FILTER", "LEN", "TYPE", "FORMAT", "SampleGT", "ALTLEN", "REFLEN", "Sparam", "genome")
+  variants_per_sparam_SNP = rbind(tmp, variants_per_sparam_SNP)
+}
+
+variants_per_sparam_SNP %>% group_by(TYPE, genome, Sparam) %>% summarise(Vars = n_distinct(POS)) %>% ggplot(aes(genome, Vars, fill = Sparam)) + geom_col(position = "dodge") + facet_wrap(~TYPE, scales = "free") + theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1))
+
+```
+
+### 7B. Overlap in the detected SVs by different param sets
+
+```{r, fig.height=5, fig.width=6, echo=FALSE, message=FALSE, warning=FALSE}
+
+library(ggVennDiagram)
+for (i in unique(variants_per_sparam$genome)){
+  xl = list("s1000" = variants_per_sparam[variants_per_sparam$genome == i & variants_per_sparam$Sparam == "s1000",]$POS, 
+            "s5000" = variants_per_sparam[variants_per_sparam$genome == i & variants_per_sparam$Sparam == "s5000",]$POS, 
+            "s10000" = variants_per_sparam[variants_per_sparam$genome == i & variants_per_sparam$Sparam == "s10000",]$POS)
+  print(ggVennDiagram(x = xl))
+}
+
+
+```
+
+### 7C. Jasmine Merge - Variants for each species supported by at least 2 methods
+
+Methods used: IMPG, MINIGRAPH and SVIM-ASM
+
+```{r, include=FALSE}
+
+jasmine_results2 = NULL
+for (i in  unique(variants_per_sparam$genome)){
+  for (x in c("s5000", "s1000", "s10000")){
+    for (y in c("STRICT", "STRICTPLUS","DEFAULT", "LENIENT")){
+      df = read.vcfR(paste0("../SV_intersects/community16.", x, ".minigraph.",i , ".", y, ".comp.vcf"))
+      dft = data.frame(df@fix) %>% mutate(REFLEN = nchar(REF), ALTLEN = nchar(ALT)) %>% mutate(SUPP = str_extract(INFO, "(?<=\\bSUPP=)[^;]+")) %>%  mutate(SVTYPE = str_extract(INFO, "(?<=\\bSVTYPE=)[^;]+")) %>% mutate(AVG_LEN = str_extract(INFO, "(?<=\\bAVG_LEN=)[^;]+"))
+      dft[,c(1,2,4,5,9,10,11,12,13)]
+      dft$genome = i
+      dft$Sparam = x
+      dft$jasmine_params = y
+      jasmine_results2 = rbind(jasmine_results2, dft)
+    }
+  }
+}
+jasmine_results2$POS = as.numeric(jasmine_results2$POS)
+```
+
+#### Counts
+
+```{r, fig.height=5, fig.width=6, echo=FALSE, message=FALSE, warning=FALSE}
+jasmine_results2 %>% group_by(jasmine_params, Sparam, genome, SVTYPE) %>% summarise(n_distinct(POS)) %>% filter(!is.na(SVTYPE))  %>% ggplot(aes(genome, `n_distinct(POS)`, fill = jasmine_params)) + geom_col(position = "dodge") + facet_wrap(SVTYPE~Sparam) + theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1)) + ggtitle("Supported by at least 2 methods") 
+
+```
+
+```{r, fig.height=5, fig.width=6, echo=FALSE, message=FALSE, warning=FALSE}
+jasmine_results2 %>% group_by(jasmine_params, Sparam, SUPP, SVTYPE) %>% summarise(n_distinct(POS)) %>% filter(!is.na(SVTYPE))  %>% ggplot(aes(SUPP, `n_distinct(POS)`, fill = jasmine_params)) + geom_col(position = "dodge") + facet_wrap(SVTYPE~Sparam) + theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1)) + ggtitle("Supported by at least 2 methods")
+
+```
+
+#### Overlap
+
+```{r, fig.height=5, fig.width=6, echo=FALSE, message=FALSE, warning=FALSE}
+
+for (i in  unique(variants_per_sparam$genome)){
+  for (x in c("s5000", "s1000", "s10000")){
+    for (m in c("INS", "DEL")){
+      jasmine_results2_split = split(jasmine_results2[jasmine_results2$SVTYPE == m & jasmine_results2$genome == i & jasmine_results2$Sparam == x,], jasmine_results2[jasmine_results2$SVTYPE == m & jasmine_results2$genome == i & jasmine_results2$Sparam == x,]$jasmine_params)
+      jasmine_results2_split = lapply(jasmine_results2_split, function(x){x$POS})
+      print(ggVennDiagram(jasmine_results2_split) + ggtitle(paste(m, i ,x)))
+    }
+  }
+}
+
+```
+
+#### Length distribution
+
+```{r, fig.height=5, fig.width=6, echo=FALSE, message=FALSE, warning=FALSE}
+
+p1 = ggplot(jasmine_results2[as.numeric(jasmine_results2$AVG_LEN) > 0,], aes(abs(as.numeric(AVG_LEN)), fill = SUPP)) + geom_histogram(position = "dodge") + scale_x_log10() + labs(x="",y = "INSERTIONS", fill = "Support by Tools") + coord_cartesian(xlim=c(10,100000)) + facet_grid(~jasmine_params)
+p2 = ggplot(jasmine_results2[as.numeric(jasmine_results2$AVG_LEN) < 0,], aes(abs(as.numeric(AVG_LEN)), fill = SUPP)) + geom_histogram(position = "dodge") + scale_x_log10() + scale_y_reverse() + labs(x="", y = "DELETIONS", fill = "Support by Tools") + coord_cartesian(xlim=c(10,100000)) + facet_grid(~jasmine_params)
+p1/p2 + plot_layout(guides='collect',axes = "collect_x")
+
+```
+
+```{r, fig.height=5, fig.width=6, echo=FALSE, message=FALSE, warning=FALSE}
+
+p1 = ggplot(jasmine_results2[as.numeric(jasmine_results2$AVG_LEN) > 0,], aes(abs(as.numeric(AVG_LEN)), colour = SUPP)) + geom_density() + scale_x_log10() + labs(x="",y = "INSERTIONS", colour = "Support by Tools") + coord_cartesian(xlim=c(10,100000)) + facet_grid(~jasmine_params)
+p2 = ggplot(jasmine_results2[as.numeric(jasmine_results2$AVG_LEN) < 0,], aes(abs(as.numeric(AVG_LEN)), colour = SUPP)) + geom_density() + scale_x_log10() + scale_y_reverse() + labs(x="", y = "DELETIONS", colour = "Support by Tools") + coord_cartesian(xlim=c(10,100000)) + facet_grid(~jasmine_params)
+p1/p2 + plot_layout(guides='collect',axes = "collect_x")
+
+```
+
+#### Per species
+
+```{r, fig.height=5, fig.width=6, echo=FALSE, message=FALSE, warning=FALSE}
+
+p1 = ggplot(jasmine_results2[as.numeric(jasmine_results2$AVG_LEN) > 0 & jasmine_results2$SUPP == 3,], aes(abs(as.numeric(AVG_LEN)), fill = genome)) + geom_histogram(position = "dodge") + scale_x_log10() + labs(x="",y = "INSERTIONS", fill = "Support by Tools") + coord_cartesian(xlim=c(10,100000))
+p2 = ggplot(jasmine_results2[as.numeric(jasmine_results2$AVG_LEN) < 0 & jasmine_results2$SUPP == 3,], aes(abs(as.numeric(AVG_LEN)), fill = genome)) + geom_histogram(position = "dodge") + scale_x_log10() + labs(x="",y = "DELETIONS", fill = "Support by Tools") + coord_cartesian(xlim=c(10,100000)) + scale_y_reverse()
+p1/p2 + plot_layout(guides='collect',axes = "collect_x")
+
+```
+
+```{r, fig.height=5, fig.width=6, echo=FALSE, message=FALSE, warning=FALSE}
+
+p1 = ggplot(jasmine_results2[as.numeric(jasmine_results2$AVG_LEN) > 0,], aes(abs(as.numeric(AVG_LEN)), colour = SUPP)) + geom_density() + scale_x_log10() + labs(x="",y = "INSERTIONS", fill = "Support by Tools") + coord_cartesian(xlim=c(10,100000)) + facet_grid(~genome)
+p2 = ggplot(jasmine_results2[as.numeric(jasmine_results2$AVG_LEN) < 0,], aes(abs(as.numeric(AVG_LEN)), colour = SUPP)) + geom_density() + scale_x_log10() + labs(x="",y = "DELETIONS", fill = "Support by Tools") + coord_cartesian(xlim=c(10,100000)) + scale_y_reverse() + facet_grid(~genome)
+p1/p2 + plot_layout(guides='collect',axes = "collect_x")
+
+```
+
+#### Focus on a specific region
+
+Here I focus on a complicated regions around rPodCre2.1#1#17 to see which method recovers the variants best.
+
+##### rPodCre2.1#1#17:624000-625000
+
+```{r, warning=FALSE, echo=FALSE}
+
+jasmine_results2[jasmine_results2$POS > 624657 & jasmine_results2$POS < 624750 & jasmine_results2$Sparam == "s5000",c(2,12:16)] %>% pivot_wider(names_from = genome, values_from = Sparam) %>% arrange(POS) %>% datatable()
+
+```
+
+```{r, fig.height=8, fig.width=12, warning=FALSE, echo=FALSE}
+
+cmd="impg query -r rPodCre2.1#1#17:624000-625000 -p /home/zajac/pggb_allcommunities/community16.s5000.paf --sequence-files ../chromosome_sets/community16_unmasked/community16.combined.fasta -o paf > /home/zajac/SV_intersects/test.aln"
+ezSystem(cmd)
+tt = SVbyEye::readPaf("../SV_intersects/test.aln")
+
+for (i in unique(tt$q.name)){
+  print(SVbyEye::plotMiro(tt[tt$q.name == i,], min.deletion.size = 1, min.insertion.size = 1, highlight.sv = "fill", binsize = 50, outline.alignments = TRUE, target.region = "rPodCre2.1#1#17:624657-624750", color.by = "identity") + ggtitle(i))
+}
+```
+
+```{r, fig.height=8, fig.width=12, warning=FALSE, echo=FALSE}
+library(Rsamtools)
+library(Gviz)
+options(ucscChromosomeNames=FALSE)
+
+chr <- "rPodCre2.1#1#17"   
+start <- 622000
+end <- 627000
+
+list_of_tracks = NULL
+axisTrack <- GenomeAxisTrack()
+list_of_tracks = list(axisTrack)
+
+for (i in list.files("/home/zajac/SYRI/community16/community16.rPodCre2.1_to_all/", pattern = "sorted.bam$")){
+  bam_file <- paste0("/home/zajac/SYRI/community16/community16.rPodCre2.1_to_all/", i)
+  alignTrack <- AlignmentsTrack(
+  range = bam_file,
+  chromosome = chr,
+  genome = "rPodCre2.1#1#17",  # your custom genome name
+  isPaired = FALSE,
+  name = i,
+  type = "pileup"
+  )
+  list_of_tracks = c(list_of_tracks,alignTrack)
+}
+
+plotTracks(list_of_tracks, from = start, to = end)
+
+```
+
+##### rPodCre2.1#1#17:1076600-1076800
+
+```{r, warning=FALSE, echo=FALSE}
+
+jasmine_results2[jasmine_results2$POS > 1076675 & jasmine_results2$POS < 1076690 & jasmine_results2$Sparam == "s5000",c(2,12:16)] %>% pivot_wider(names_from = genome, values_from = Sparam) %>% arrange(POS) %>% datatable()
+
+```
+
+```{r, fig.height=8, fig.width=12, warning=FALSE, echo=FALSE}
+
+cmd="impg query -r rPodCre2.1#1#17:1076600-1076800 -p /home/zajac/pggb_allcommunities/community16.s5000.paf --sequence-files ../chromosome_sets/community16_unmasked/community16.combined.fasta -o paf > /home/zajac/SV_intersects/test.aln"
+ezSystem(cmd)
+tt = SVbyEye::readPaf("../SV_intersects/test.aln")
+
+for (i in unique(tt$q.name)){
+  print(SVbyEye::plotMiro(tt[tt$q.name == i,], min.deletion.size = 1, min.insertion.size = 1, highlight.sv = "fill", binsize = 50, outline.alignments = TRUE, target.region = "rPodCre2.1#1#17:1076600-1076800", color.by = "identity") + ggtitle(i))
+}
+```
+
+```{r, fig.height=8, fig.width=12, warning=FALSE, echo=FALSE}
+library(Rsamtools)
+library(Gviz)
+options(ucscChromosomeNames=FALSE)
+
+chr <- "rPodCre2.1#1#17"   
+start <- 1076600
+end <- 1076800
+
+list_of_tracks = NULL
+axisTrack <- GenomeAxisTrack()
+list_of_tracks = list(axisTrack)
+
+for (i in list.files("/home/zajac/SYRI/community16/community16.rPodCre2.1_to_all/", pattern = "sorted.bam$")){
+  bam_file <- paste0("/home/zajac/SYRI/community16/community16.rPodCre2.1_to_all/", i)
+  alignTrack <- AlignmentsTrack(
+  range = bam_file,
+  chromosome = chr,
+  genome = "rPodCre2.1#1#17",  # your custom genome name
+  isPaired = FALSE,
+  name = i,
+  type = "pileup"
+  )
+  list_of_tracks = c(list_of_tracks,alignTrack)
+}
+
+plotTracks(list_of_tracks, from = start, to = end)
+
+```
+
+### 7D. Jasmine Merge - Variants supported by at least 2 methods merged across species
+
+#### PCA
+
+```{r, include=FALSE}
+
+find_NAs <- function(x){
+    NAs_TF <- is.na(x)
+    i_NA <- which(NAs_TF == TRUE)
+    N_NA <- length(i_NA)
+    
+    cat("Results:",N_NA, "NAs present\n.")
+    return(i_NA)
+}
+
+
+invar_omit <- function(x){
+    cat("Dataframe of dim",dim(x), "processed...\n")
+    sds <- apply(x, 2, sd, na.rm = TRUE)
+    i_var0 <- which(sds == 0)
+    
+    
+    cat(length(i_var0),"columns removed\n")
+    
+    if(length(i_var0) > 0){
+        x <- x[, -i_var0]
+    }
+    
+    ## add return()  with x in it
+    return(x)                      
+}
+
+PCA_variation <- function(pca_summary, PCs = 2){
+    var_explained <- pca_summary$importance[2,1:PCs]*100
+    var_explained <- round(var_explained,1)
+    return(var_explained)
+}
+
+```
+
+##### ALL SVs
+
+```{r, fig.height=8, fig.width=12, warning=FALSE, echo=FALSE}
+library(vcfR)
+library(ggrepel)
+
+pcas = NULL
+for (x in c("STRICT", "STRICTPLUS","DEFAULT", "LENIENT")){
+  org = read.vcfR(paste0("../SV_intersects/merged.", x, ".vcf"))
+  org = cbind(data.frame(org@fix), data.frame(org@gt))
+  snps_num_t = org[,c(10:23)] %>% mutate(across(everything() , ~ sapply(str_split(., ":"), .subset, 1)))
+  snps_num_t = data.frame(t(snps_num_t %>% dplyr::mutate(across(everything(), ~ case_when(. == "0|0" ~ 0, . == "0" ~ 0, . == "1|1" ~ 1, . == "1" ~ 1,  . == "0|1" ~ 1, . == "1|0" ~ 1, . == ".|1" ~ 1, . == "0|."~ 0, . == ".|0" ~ 0, . == "1|." ~ 1 )))))
+  N_rows <- nrow(snps_num_t)
+  N_cols <- ncol(snps_num_t)
+  N_NA   <- rep(x = 0, times = N_cols)
+  N_SNPs <- ncol(snps_num_t)
+  snps_num_t02 = snps_num_t[, colSums(is.na(snps_num_t)) < 1]
+  snps_no_invar <- invar_omit(snps_num_t02) 
+  SNPs_scaled <- scale(snps_no_invar)
+  pca_scaled <- prcomp(SNPs_scaled)
+  
+  summary_out_scaled <- summary(pca_scaled)
+  var_out <- PCA_variation(summary_out_scaled,PCs = 10)
+  N_columns <- ncol(SNPs_scaled)
+  pca_scores <- vegan::scores(pca_scaled)
+  p1 = ggpubr::ggscatter(data = data.frame(pca_scores) %>% rownames_to_column("Sample"),
+                    y = "PC2", ylab = paste("PC2", var_out["PC2"][[1]]),
+                    x = "PC1", xlab = paste("PC1", var_out["PC1"][[1]])) + geom_text_repel(aes(label = Sample)) + ggtitle(x)
+  pcas[[x]] = p1
+}
+
+
+plot_grid(plotlist = pcas, ncol = 2)
+
+```
+
+##### SVs shared between at least 2 sp
+
+```{r, fig.height=8, fig.width=12, warning=FALSE, echo=FALSE}
+
+pcas = NULL
+for (x in c("STRICT", "STRICTPLUS","DEFAULT", "LENIENT")){
+  org = read.vcfR(paste0("../SV_intersects/merged.", x, ".vcf"))
+  org = cbind(data.frame(org@fix), data.frame(org@gt))  %>% mutate(SUPP = str_extract(INFO, "(?<=\\bSUPP=)[^;]+"))
+  snps_num_t = org[org$SUPP >= 2,c(10:23)] %>% mutate(across(everything() , ~ sapply(str_split(., ":"), .subset, 1)))
+  snps_num_t = data.frame(t(snps_num_t %>% dplyr::mutate(across(everything(), ~ case_when(. == "0|0" ~ 0, . == "0" ~ 0, . == "1|1" ~ 1, . == "1" ~ 1,  . == "0|1" ~ 1, . == "1|0" ~ 1, . == ".|1" ~ 1, . == "0|."~ 0, . == ".|0" ~ 0, . == "1|." ~ 1 )))))
+  N_rows <- nrow(snps_num_t)
+  N_cols <- ncol(snps_num_t)
+  N_NA   <- rep(x = 0, times = N_cols)
+  N_SNPs <- ncol(snps_num_t)
+  snps_num_t02 = snps_num_t[, colSums(is.na(snps_num_t)) < 1]
+  snps_no_invar <- invar_omit(snps_num_t02) 
+  SNPs_scaled <- scale(snps_no_invar)
+  pca_scaled <- prcomp(SNPs_scaled)
+  
+  summary_out_scaled <- summary(pca_scaled)
+  var_out <- PCA_variation(summary_out_scaled,PCs = 10)
+  N_columns <- ncol(SNPs_scaled)
+  pca_scores <- vegan::scores(pca_scaled)
+  p1 = ggpubr::ggscatter(data = data.frame(pca_scores) %>% rownames_to_column("Sample"),
+                    y = "PC2", ylab = paste("PC2", var_out["PC2"][[1]]),
+                    x = "PC1", xlab = paste("PC1", var_out["PC1"][[1]])) + geom_text_repel(aes(label = Sample)) + ggtitle(x)
+  pcas[[x]] = p1
+}
+
+
+plot_grid(plotlist = pcas, ncol = 2)
+
+```
+
+##### Number and sharing of SVs
+
+```{r, fig.height=8, fig.width=12, warning=FALSE, echo=FALSE}
+library(pheatmap)
+
+for (x in c("STRICT", "STRICTPLUS","DEFAULT", "LENIENT")){
+  org = read.vcfR(paste0("../SV_intersects/merged.", x, ".vcf"))
+  org = cbind(data.frame(org@fix), data.frame(org@gt)) 
+  cols= colnames(org)[10:23]
+  xx = org[,c(1,2,10:23)] %>% 
+    mutate(across(all_of(cols) , ~ sapply(str_split(., ":"), .subset, 1))) %>% mutate(across(all_of(cols), ~ case_when(. == "0|0" ~ 0, . == "1|1" ~ 1, . == "1" ~ 1,  . == "0|1" ~ 1, . == "1|0" ~ 1, . == ".|1" ~ 1, . == "0|."~ 0, . == ".|0" ~ 0, . == "1|." ~ 1 ))) %>%
+    reshape2::melt(id.vars = c("CHROM", "POS")) %>% 
+    filter(value != 0) 
+  xx = split(xx, xx$variable)
+  xx = lapply(xx, function(x){return(x$POS)})
+
+  mtx = matrix(nrow = 14, ncol = 14)
+  rownames(mtx) = names(xx)
+  colnames(mtx) = names(xx)
+  for (i in names(xx)){for (x in names(xx)){ mtx[i,x] = length(intersect(xx[[i]], xx[[x]]))}}
+  print(pheatmap(mtx))
+}
+
+```
+
+##### Distribution of SVs
+
+```{r, fig.height=15, fig.width=11, warning=FALSE, echo=FALSE}
+library(pheatmap)
+
+dna <- ape::read.dna("../chromosome_sets/community16_unmasked/rPodCre2.1#1#17.fasta", format = "fasta")
+
+plots = NULL
+for (x in c("STRICT", "STRICTPLUS","DEFAULT", "LENIENT")){
+  org = read.vcfR(paste0("../SV_intersects/merged.", x, ".vcf"))
+  org = cbind(data.frame(org@fix), data.frame(org@gt)) 
+  p = ggplot(org, aes(x = as.numeric(POS))) +
+    geom_histogram(
+        bins = 500,              # or choose binwidth = chrom_length/100
+        fill = "darkgreen",
+        color = "white",
+        alpha = 0.7
+    ) +
+    xlim(0, length(dna)) +
+    labs(
+        title = "Density of Positions Across Chromosome",
+        x = "Genomic Position (bp)",
+        y = "Count per Bin"
+    ) +
+    theme_minimal() + ggtitle(x)
+  plots[[x]] = p
+}
+
+plot_grid(plotlist = plots, ncol = 1)
+```

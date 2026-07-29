@@ -292,7 +292,7 @@ pdf("../Figures/Raffonei_full_analysis.pdf", width = 15, height = 9)
 p2 + p3
 dev.off()
 
-##Check how the results compare if you overlap the inversions iwth the genome wide estimation in 50kb windows
+##Check how the results compare if you overlap the inversions with the genome wide estimation in 50kb windows
 check = NULL
 for (i in unique(all_noncolinear_modified$Chr)) {
   
@@ -347,3 +347,14 @@ check[grepl("rPodRaf1#1", check$seqnames.1),] %>%
   group_by(perc = `sum(overlap_length)`*100/width.1) %>% 
   group_by(seqnames.1,start.1,end.1, width.1) %>% 
   slice_max(perc, with_ties = TRUE) %>% data.frame()
+
+## Plot karyotype
+library(RIdeogram)
+bed_raf = beds[beds$Focal_genome == "rPodRaf1",]
+bed_raf = bed_raf %>% mutate("Chr" = Focal_chr)
+bed_raf = bed_raf[,c("Chr", "Start", "End")]
+bed_raf = bed_raf[bed_raf$Chr != "W",]
+mosaic = all_noncolinear_modified[all_noncolinear_modified$Focal_genome == "rPodRaf1",c("Focal_genome" ,"Focal_hap" ,"Focal_chr" ,"Chromosome_Window_Start", "Chromosome_Window_End", "Compared_clade")] %>% mutate("Chr" = Focal_chr, Value = case_when(Compared_clade == "Sicilian-Maltese" ~ 0, Compared_clade == "Muralis" ~ 50, Compared_clade == "Siculus" ~ 100, .default = 0)) %>% dplyr::select(Chr, Chromosome_Window_Start, Chromosome_Window_End, Value) 
+colnames(mosaic) = c("Chr", "Start", "End", "Value")
+mosaic$Chr <- unname(as.character(mosaic$Chr))
+ideogram(karyotype = bed_raf, overlaid = mosaic, output = "../Figures/Raffonei.mosaic.karyotype.svg", colorset1 = c("cyan4", "green", "yellow"))
