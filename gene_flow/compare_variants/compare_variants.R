@@ -100,7 +100,7 @@ cophy_snp_sv <- cophylo(tr_snp_r, tr_sv_r, rotate = TRUE)  # rotate=TRUE minimiz
 plot(cophy_snp_sv,
      link.lwd = 2,
      link.type = "curved",
-     link.col = "#21908CFF",
+     link.col = "black",
      fsize = 0.8)
 title("SNP tree vs SV tree")
 dev.off()
@@ -111,7 +111,7 @@ cophy_snp_inv <- cophylo(tr_snp_r, tr_inv_r, rotate = TRUE)
 plot(cophy_snp_inv,
      link.lwd = 2,
      link.type = "curved",
-     link.col = "darkorange",
+     link.col = "black",
      fsize = 0.8)
 title("SNP tree vs Inversion tree")
 dev.off()
@@ -122,7 +122,7 @@ cophy_sv_inv <- cophylo(tr_sv_r, tr_inv_r, rotate = TRUE)
 plot(cophy_sv_inv,
      link.lwd = 2,
      link.type = "curved",
-     link.col = "#440154FF",
+     link.col = "black",
      fsize = 0.8)
 title("SV tree vs Inversion tree")
 dev.off()
@@ -204,6 +204,9 @@ best_snp; best_sv; best_inv   #Chek
 dend_snp <- as.dendrogram(hclust(d_snp, method = best_snp))
 dend_sv  <- as.dendrogram(hclust(d_sv,  method = best_sv))
 dend_inv <- as.dendrogram(hclust(d_inv, method = best_inv))
+
+tanglegram(dend_snp, dend_sv,  main_left = "SNP", main_right = "SV")
+tanglegram(dend_snp, dend_inv, main_left = "SNP", main_right = "INV")
 
 tanglegram(dend_snp, dend_sv,  main_left = "SNP", main_right = "SV")
 tanglegram(dend_snp, dend_inv, main_left = "SNP", main_right = "INV")
