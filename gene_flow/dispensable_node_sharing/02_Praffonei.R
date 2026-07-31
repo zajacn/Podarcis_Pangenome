@@ -5,6 +5,10 @@ library(tidyverse)
 library(GenomicRanges)
 library(ggplot2)
 
+## Load community to map
+
+chr_map = read.delim("/home/zajac/chromosome_sets/community.chr.map")
+
 ##Load inversions
 invs = read.delim("../INVERSIONS/inversions.clustered.0.9proc.mapq.mapc.filtered.node_annotation.txt")
 shared = invs[invs$is_singleton == "FALSE",] %>% 
@@ -358,3 +362,56 @@ mosaic = all_noncolinear_modified[all_noncolinear_modified$Focal_genome == "rPod
 colnames(mosaic) = c("Chr", "Start", "End", "Value")
 mosaic$Chr <- unname(as.character(mosaic$Chr))
 ideogram(karyotype = bed_raf, overlaid = mosaic, output = "../Figures/Raffonei.mosaic.karyotype.svg", colorset1 = c("cyan4", "green", "yellow"))
+
+## SVbyEye plots checking equivalent regions in parental genomes
+library(SVbyEye)
+inversions_to_check = c(unique(hits_long[which(hits_long$clade == "Muralis" & hits_long$value == "TRUE" & hits_long$category2 == "Unique to Raffonei"),]$inv_ids), unique(hits_long[which(hits_long$clade == "Siculus" & hits_long$value == "TRUE" & hits_long$category2 == "Unique to Raffonei" & hits_long$category == "dispsimilarity"),]$inv_ids))
+inversions_to_check = droplevels(inversions_to_check)
+inversions_to_check = data.frame(inversions_to_check) %>% separate(inversions_to_check, into = c("species","subject_start","subject_end"), sep = "_") %>% mutate(subject_start = as.integer(subject_start), subject_end = as.integer(subject_end)) %>% left_join(invs) 
+
+pafs = chr_map[chr_map$chromosome %in% sapply(str_split(inversions_to_check$chr, "#"), .subset, 3),]$community
+pafs = list.files(paste0("/home/zajac/SYRI/community", pafs, "/"), pattern = "paf", recursive = T, full.names = T)
+pafs_for_plotting = NULL
+for (i in pafs){
+  name = str_remove(str_remove(sapply(str_split(i, "/"), .subset, 8), ".rev.fasta.sorted.paf"),  ".fasta.sorted.paf")
+  paf.table <- readPaf(
+    paf.file = i,
+    include.paf.tags = TRUE, restrict.paf.tags = "cg"
+  )
+  pafs_for_plotting[[name]] = paf.table
+}
+
+inversions_to_check_pafs = apply(inversions_to_check, 1, function(x){
+  chr = str_remove(as.character(x[["chr"]]), "rPodCre2.1#1")
+  start = as.numeric(x[["start"]]) - 10000
+  end = as.numeric(x[["end"]]) + 10000
+  start2 = as.numeric(x[["start"]]) - 5000000
+  end2 = as.numeric(x[["end"]]) + 5000000
+  newpafs = NULL
+  for (i in names(pafs_for_plotting)[grepl(paste0(chr, "$"), names(pafs_for_plotting))]){
+    out = pafs_for_plotting[[i]][pafs_for_plotting[[i]]$t.start > start & pafs_for_plotting[[i]]$t.end < end & pafs_for_plotting[[i]]$q.start > start2 & pafs_for_plotting[[i]]$q.end < end2,]
+    newpafs[[i]] = out
+  }
+  allnewpafs = bind_rows(newpafs)
+  return(allnewpafs)
+})
+
+miroplots = NULL
+for (seq in 1:length(inversions_to_check_pafs)){
+  plots = NULL
+  for (x in unique(inversions_to_check_pafs[[seq]]$q.name)){
+    p = plotMiro(inversions_to_check_pafs[[seq]][inversions_to_check_pafs[[seq]]$q.name == x,], genomic.scale = "kbp")
+    plots[[x]] = p
+  }
+  miroplots[[seq]] = plots
+}
+
+pdf("Figures/Praffonei_INV_CHR13.pdf", height = 8, width = 5)
+miroplots[[1]]$`rPodRaf1#1#13`/miroplots[[1]]$`rPodMur119#2#13`/miroplots[[1]]$`rPodMur119#1#13`/miroplots[[1]]$`PodMur1#1#13` + plot_layout(guides = "collect")
+dev.off()
+pdf("Figures/Praffonei_INV_CHR13.2.pdf", height = 8, width = 5)
+miroplots[[2]]$`rPodRaf1#1#13`/miroplots[[2]]$`rPodMur119#2#13`/miroplots[[2]]$`rPodMur119#1#13`/miroplots[[2]]$`PodMur1#1#13` + plot_layout(guides = "collect")
+dev.off()
+pdf("Figures/Praffonei_INV_CHR2.pdf", height = 6, width = 5)
+miroplots[[3]]$`rPodRaf1#1#2`/miroplots[[3]]$`rPodSic1#1#2`/miroplots[[3]]$`rPodSic1#2#2` + plot_layout(guides = "collect")
+dev.off()
