@@ -1,0 +1,988 @@
+---
+title: "PGGB and Minigraph summary"
+author: "Natalia Zajac"
+date: "11/11/2025"
+output:
+  html_document: 
+    highlight: pygments
+    theme: sand
+    code_folding: true
+    toc: true
+    toc_float: true
+---
+
+# This notebook aims to evaluate how much sequence is retained from each genome in minigraph and summarise statistics from the pangenome (PGGB)
+
+```{r setup, echo=FALSE, include=FALSE, warning=FALSE}
+library(vcfR)
+library(utils)
+library(dplyr)
+library(tidyverse)
+library(reshape2)
+library(cowplot)
+library(patchwork)
+library(ezRun)
+library(ggbeeswarm)
+library(data.table)
+library(DT)
+library(circlize)
+library(ComplexHeatmap)
+source("functions.R")
+
+cov_minimap2 = NULL
+for (i in seq(0,18,1)){
+  cov = read.delim(paste0("/home/zajac/SYRI/community", i, "/community", i, ".rPodCre2.1_to_all/coverage.summary.txt"), header = F, sep = "\t")
+  cov_minimap2 = rbind(cov_minimap2, cov)
+}
+cov_minimap2$genome_mapped = str_remove(cov_minimap2$V1, ".fasta.sorted.bam")
+
+cov_minigraph=NULL
+for (n in seq(0,18,1)){
+  temp=NULL
+  for (i in list.files(paste0("../minigraph/community", n), pattern = ".cov.txt", recursive = TRUE)){
+    name = str_remove(i, ".fasta.cov.txt")
+    df = read.delim(paste0("../minigraph/community", n, "/", i), header = F)
+    df$V2 = as.numeric(str_remove(df$V2, "LN:i:"))
+    df$V3 = str_remove(df$V3, "SN:Z:")
+    df$V4 = str_remove(df$V4, "dc:f:")
+    df$V5 = as.numeric(df$V4) * as.numeric(df$V2)
+    df$genome_mapped = name
+    length_of_mapped_genome=list.files(paste0("../chromosome_sets/community", n, "_unmasked/"), pattern = name, recursive = T)[grepl("fai", list.files(paste0("../chromosome_sets/community", n, "_unmasked/"), pattern = name, recursive = T))]
+    length_of_mapped_genome = read.delim(paste0("../chromosome_sets/community", n, "_unmasked/", length_of_mapped_genome), header = F)
+    df$total_length = length_of_mapped_genome$V2
+    df = df %>% group_by(genome_mapped) %>% summarise(total_length_mapped = sum(V5), total_length = mean(total_length))
+    df$percentage_included = (df$total_length_mapped*100)/df$total_length
+    temp = rbind(temp, df)
+  }
+  cov_minigraph = rbind(cov_minigraph,temp)
+}
+
+cov_pggb = NULL
+for (n in seq(0,18,1)){
+  temp=NULL
+  for (i in list.files(paste0("../pggb_allcommunities/community", n, ".s5000"), pattern = "sorted.stats", recursive = TRUE)){
+    df = read.delim(paste0("../pggb_allcommunities/community", n, ".s5000/", i), skip = 18)[-27,]
+    length_of_mapped_genome=list.files(paste0("../chromosome_sets/community", n, "_unmasked/"), pattern = "combined", recursive = T)[grepl("fai", list.files(paste0("../chromosome_sets/community", n, "_unmasked/"), pattern = "combined", recursive = T))]
+    length_of_mapped_genome = read.delim(paste0("../chromosome_sets/community", n, "_unmasked/", length_of_mapped_genome), header = F)
+    df = merge(df,length_of_mapped_genome[,c(1,2)], by.x = "path", by.y = "V1")
+    df$percentage = (df$nucleotides*100)/df$V2
+    temp = rbind(temp, df[,c(1,8)])
+  }
+  cov_pggb = rbind(cov_pggb,temp)
+}
+
+#Size of pangenome
+
+minigraph_size=NULL
+for (n in seq(0,18,1)){
+  temp=NULL
+  for (i in list.files(paste0("../minigraph/community", n), pattern = "contributing.genome", recursive = TRUE)){
+    df = read.delim(paste0("../minigraph/community", n, "/", i), header = F)
+    df$V1 = as.numeric(str_remove(df$V1, "LN:i:"))
+    df$V2 = str_remove(df$V2, "SN:Z:")
+    length_of_mapped_genome=list.files(paste0("../chromosome_sets/community", n, "_unmasked/"), pattern = "combined", recursive = T)[grepl("fai", list.files(paste0("../chromosome_sets/community", n, "_unmasked/"), pattern = "combined", recursive = T))]
+    length_of_mapped_genome = read.delim(paste0("../chromosome_sets/community", n, "_unmasked/", length_of_mapped_genome), header = F)
+    df$cretensis_length = length_of_mapped_genome[grepl("rPodCre2.1", length_of_mapped_genome$V1),]$V2
+    df = df %>% separate(V2, into = c("species", "hap", "chromosome"), sep = "#")
+    temp = rbind(temp, df)
+  }
+  minigraph_size = rbind(minigraph_size,temp)
+}
+
+pggb_size = NULL
+for (n in seq(0,18,1)){
+  temp=NULL
+  for (i in list.files(paste0("../pggb_allcommunities/community", n, ".s5000"), pattern = "sorted.stats", recursive = TRUE)){
+    df = read.delim(paste0("../pggb_allcommunities/community", n, ".s5000/", i))[1,]
+    length_of_mapped_genome=list.files(paste0("../chromosome_sets/community", n, "_unmasked/"), pattern = "combined", recursive = T)[grepl("fai", list.files(paste0("../chromosome_sets/community", n, "_unmasked/"), pattern = "combined", recursive = T))]
+    length_of_mapped_genome = read.delim(paste0("../chromosome_sets/community", n, "_unmasked/", length_of_mapped_genome), header = F)
+    df$cretensis_length = length_of_mapped_genome[grepl("rPodCre2.1", length_of_mapped_genome$V1),]$V2
+    temp = rbind(temp, df)
+  }
+  pggb_size = rbind(pggb_size,temp)
+}
+pggb_size$pggb_size = as.numeric(pggb_size$X.length)/pggb_size$cretensis_length
+
+sample_data = read.delim("/groups/mpistaff/Zajac/genomes/sample_data.tsv")
+sample_data$clade=factor(sample_data$clade,levels=c("Balkan","Sicilian-Maltese","Western","Siculus","Muralis","Iberian"))
+chr_map = read.delim("../chromosome_sets/community.chr.map")
+```
+
+## 1. How much of each genome is retained in the analysis
+
+```{r, fig.height=25, fig.width=25, echo=FALSE, warning=FALSE}
+
+merge(merge(cov_minimap2[,c(11,8)] %>% mutate(genome_mapped = str_remove(genome_mapped, ".rev")) , cov_minigraph[,c(1,4)] %>% mutate(genome_mapped = str_remove(genome_mapped, ".rev")), by = "genome_mapped"), cov_pggb, by.x = "genome_mapped" ,by.y = "path") %>% mutate(minimap2 = V8*100, minigraph = if_else(percentage_included > 100, 100,percentage_included) , pggb = percentage) %>% dplyr::select(1,5,6,7) %>% reshape2::melt(id.vars = "genome_mapped") %>% separate(genome_mapped, into = c("species", "hap", "chromosome"), sep = "#") %>% ggplot(aes(paste(species, hap), value, fill = variable)) + geom_col(position = "dodge") + facet_wrap(~chromosome, scales = "free") + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) + labs(x = "Genome Haplotype", y = "Percetage of sequence retained in the analysis")
+
+```
+
+## 2. How much does each chromosome increase if all sequence included
+
+```{r, fig.height=7, fig.width=15, echo=FALSE, warning=FALSE}
+
+merge(minigraph_size %>%  group_by(chromosome) %>% summarise(minigraph_size = sum(V1), cretensis_length = mean(cretensis_length)), pggb_size, by = "cretensis_length") %>% mutate(minigraph_size = minigraph_size/cretensis_length) %>% dplyr::select(2,3,9) %>% reshape2::melt(id.vars = "chromosome") %>% ggplot(aes(chromosome, value, fill = variable)) + geom_col(position = "dodge") + labs(y = "Increase in size in comparison to P.cretensis genome")
+
+```
+
+## 3. Does pggb have variants in regions unmapped in minimap2
+
+```{r, fig.height=7, fig.width=15, echo=FALSE, warning=FALSE}
+
+cov_matters = NULL
+
+for (i in seq(0,18,1)){
+  sp=NULL
+  for (x in unique(minigraph_size$species)){
+    depth_files = list.files(paste0("../SYRI/community", i, "/community", i, ".rPodCre2.1_to_all/"), pattern = x)[grepl("depth", list.files(paste0("../SYRI/community", i, "/community", i, ".rPodCre2.1_to_all/"), pattern = x))]
+    dp = NULL
+    for (l in depth_files){
+      dpt = read.delim(paste0("../SYRI/community", i, "/community", i, ".rPodCre2.1_to_all/", l), header = F)
+      dp = rbind(dpt, dp)
+    }
+    colnames(dp) = c("chrom", "pos", "depth")
+    dp = dp %>% group_by(chrom, pos) %>% summarise(depth = max(as.numeric(depth))) %>% arrange(as.numeric(pos))
+    dp$group <- cumsum(c(TRUE, dp$depth[-1] != dp$depth[-nrow(dp)]))
+    dp = dp %>% group_by(chrom, group, depth) %>% summarise("start" = min(pos), "end" = max(pos))
+    dp = dp[,c(1,3,4,5)]
+    dp = makeGRangesFromDataFrame(dp, seqnames.field = "chrom", start.field = "start", end.field = "end", keep.extra.columns = T)
+    pggb_SNP=read.vcfR(paste0("../pggb_allcommunities/community", i, ".s5000/community", i, ".", x, ".pggb.waved.norm.SNP.vcf"))
+    pggb_SNP=data.frame(pggb_SNP@fix)
+    pggb_SV=read.vcfR(paste0("../pggb_allcommunities/community", i, ".s5000/community", i, ".", x, ".pggb.waved.norm.SV.vcf"))
+    pggb_SV=data.frame(pggb_SV@fix)
+    pggb_MNP=read.vcfR(paste0("../pggb_allcommunities/community", i, ".s5000/community", i, ".", x, ".pggb.waved.norm.MNP.vcf"))
+    pggb_MNP=data.frame(pggb_MNP@fix)
+    pggb_all = rbind(pggb_SNP[,c(1,2)] %>% mutate(cat = "SNP"), pggb_SV[,c(1,2)] %>% mutate(cat = "MNP"), pggb_MNP[,c(1,2)] %>% mutate(cat = "SV"))
+    pggb_all = makeGRangesFromDataFrame(pggb_all, seqnames.field = "CHROM", start.field = "POS", end.field = "POS", keep.extra.columns = T)
+    hits = findOverlaps(pggb_all, dp)
+    query_hits   <- pggb_all[queryHits(hits)]
+    subject_hits <- dp[subjectHits(hits)]
+    overlaps <- pintersect(query_hits, subject_hits)
+    result <- data.frame(
+    query_seqname   = as.character(seqnames(query_hits)),
+    query_start     = start(query_hits),
+    query_end       = end(query_hits),
+    query_cat       = query_hits$cat,
+    subject_seqname = as.character(seqnames(subject_hits)),
+    subject_start   = start(subject_hits),
+    subject_depth   = subject_hits$depth,
+    subject_end     = end(subject_hits)) %>% unique()
+    result = result %>% group_by(query_cat,subject_depth, query_seqname) %>% summarise(n_distinct(query_start)) %>% mutate(subject_depth = if_else(subject_depth != "0", "1+", "0")) %>% group_by(query_seqname, query_cat, subject_depth) %>% summarise(variant_nb = sum(`n_distinct(query_start)`)) %>% mutate(species = x) 
+    sp = rbind(result, sp)
+  }
+  cov_matters = rbind(sp, cov_matters)
+}
+
+cov_matters %>% ggplot(aes(species, variant_nb, fill = query_cat)) + geom_col(position = "dodge") + facet_wrap(~subject_depth) + scale_y_log10() + scale_fill_manual(values = c("cornflowerblue", "gold3", "darkgreen")) + theme_bw() + labs(x = "species", y = "Number of variants",  fill = "variant type")
+
+```
+
+## 4. What is core/dispensable/private
+
+```{r, fig.height=7, fig.width=15, echo=FALSE, warning=FALSE}
+
+growth_curve = NULL
+for (i in seq(0,18,1)){
+  comm = paste0("community",i)
+  spstats1 = read.delim(paste0("../pggb_allcommunities/community",i, ".s5000/community",i, ".sorted.stats"), sep = "\t", header = F,skip = 2)[1:15,]
+  colnames(spstats1) = c("sample", "core", "private", "dispensable")
+  if (is.null(growth_curve)){
+    growth_curve = spstats1
+  } else {
+    growth_curve = merge(growth_curve,spstats1, by = "sample")
+    growth_curve = growth_curve %>% mutate(across(all_of(colnames(growth_curve)[-1]), ~ as.numeric(.)))
+    growth_curve$core = growth_curve$core.x + growth_curve$core.y
+    growth_curve$private = growth_curve$private.x + growth_curve$private.y
+    growth_curve$dispensable = growth_curve$dispensable.x + growth_curve$dispensable.y
+    growth_curve = growth_curve[,c(1,8,9,10)]
+  }
+}
+growth_curve$sample = sample_data[match(growth_curve$sample, sample_data$MyName),]$Organism.Name
+growth_curve$clade = sample_data[match(growth_curve$sample, sample_data$Organism.Name),]$clade
+species = growth_curve %>% mutate(total = as.numeric(private) + as.numeric(dispensable)) %>% arrange(as.numeric(total)) %>% dplyr::select(sample) %>% as.list()
+
+p1 = growth_curve %>% reshape2::melt(id.vars = c("sample", "clade")) %>% ggplot(aes(sample, as.numeric(value)/1000000000 , fill = factor(variable, levels = c("private", "dispensable", "core")))) + geom_col(position = "stack") + labs(x = "species", y = "Sequence length (Gbp)", fill = "PG Sequence Class") + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1)) + scale_fill_manual(values = c("#cc79a7", "orange","#0072b2")) + theme_bw() + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust =1, face = "italic", size = 9), legend.position = "top", legend.text = element_text(size = 12))
+
+pdf("../Figures/PG_size_perSpecies.pdf", width = 8, height = 4)
+p1 + facet_grid(~clade, space = "free", scales = "free")
+dev.off()
+
+
+
+##Alternative
+growth_curve$total = growth_curve$private + growth_curve$dispensable + growth_curve$core
+growth_curve = growth_curve %>% mutate(dispensable = dispensable*100/total, core= core*100/total, private= private*100/total) %>% dplyr::select(1:5) %>% reshape2::melt(id.vars = c("sample", "clade")) 
+growth_curve$variable = factor(growth_curve$variable, levels = c("core", "dispensable", "private"))
+growth_curve$sample = factor(growth_curve$sample, levels = c("Podarcis gaigeae", "Podarcis melisellensis", "Podarcis erhardii", "Podarcis cretensis", "Podarcis filfolensis", "Podarcis raffonei", "Podarcis pityusensis", "Podarcis lilfordi", "Podarcis tiliguerta", "Podarcis bocagei", "Podarcis vaucheri","Podarcis liolepis", "Podarcis muralis nigriv.", "Podarcis muralis", "Podarcis siculus"))
+growth_curve$clade = factor(growth_curve$clade, levels = rev(c("Siculus", "Muralis", "Iberian", "Western", "Sicilian-Maltese", "Balkan")))
+
+pdf("../Figures/PG_size_perSpecies.pdf", width = 5, height = 8)
+ggplot(growth_curve, aes(value,sample, fill = variable)) + geom_col() + facet_grid(clade~., scales = "free", space = "free") + scale_fill_manual(values = c("#0072b2", "orange","#cc79a7")) + theme_bw() + theme(axis.text.y = element_text(face = "italic"), legend.position = "top") + labs(x = "Genome length (%)", y = "", fill = "Class")
+dev.off()
+```
+
+## 4. What is core/dispensable/private but per chromosome
+
+```{r, fig.height=7, fig.width=15, echo=FALSE, warning=FALSE}
+
+growth_curve = NULL
+for (i in seq(0,18,1)){
+  comm = paste0("community",i)
+  spstats1 = read.delim(paste0("../pggb_allcommunities/community",i, ".s5000/community",i, ".sorted.stats"), sep = "\t", header = F,skip = 2)[1:15,]
+  colnames(spstats1) = c("sample", "core", "private", "dispensable")
+  spstats1$community = i
+  growth_curve = rbind(spstats1,growth_curve)
+}
+pdf("../Figures/PG_size_classes_perCHR.pdf", width = 5, height = 8)
+merge(growth_curve, chr_map, by = "community") %>% reshape2::melt(id.vars = c("sample","community", "chromosome")) %>% arrange() %>% ggplot(aes(as.numeric(value), factor(chromosome, levels = c(as.character(seq(1,18,1)), "Z")), fill = factor(variable, levels = c("core", "dispensable", "private")))) + geom_col(position = "fill") + theme_bw()  + scale_fill_manual(values = c("darkcyan", "darkblue","pink3")) + theme(legend.position = "top", text = element_text(size =18)) + labs(y = "Chromosome", x = "Proportion", fill = "Class")
+dev.off()
+```
+
+## 5. Compression ratio per chromsome
+
+```{r, fig.height=7, fig.width=15, echo=FALSE, warning=FALSE}
+
+comp_ratio = NULL
+for (i in seq(0,18,1)){
+  comm = paste0("community",i)
+  size = read.delim(paste0("../pggb_allcommunities/community",i, ".s5000/community",i, ".sorted.stats"), sep = "\t", header = T)[1,]$X.length
+  chromosome = unique(sapply(str_split(read.delim(paste0("../chromosome_sets/", comm, "_unmasked/", comm, ".combined.fasta.fai"), header = F)$V1, "#"), .subset, 3))
+  mean_chr_size = read.delim(paste0("../chromosome_sets/", comm, "_unmasked/", comm, ".combined.fasta.fai"), header = F)[,c(1,2)] %>% mutate(V1 = sapply(str_split(V1, "#"), .subset, 1)) %>% group_by(V1) %>% summarise(V2 = mean(V2)) %>% mutate(V3 = size) %>% mutate(V4 = chromosome)
+  comp_ratio = rbind(comp_ratio, mean_chr_size)
+}
+
+pdf("../Figures/PG_compressionR_perChr.pdf", width = 4, height = 5)
+comp_ratio$V4 = factor(comp_ratio$V4, levels = c(seq(1,18,1), "Z"))
+ggplot(comp_ratio, aes(as.numeric(V3)/as.numeric(V2), V4 )) + geom_boxplot(fill = "skyblue") + theme_linedraw()  + labs(x= "Size of the graph/Size of the chromosome", y = "Chromosome")
+dev.off()
+
+```
+
+###The two above combined
+
+```{r, fig.height=7, fig.width=15, echo=FALSE, warning=FALSE}
+growth_curve = merge(growth_curve, chr_map, by = "community") 
+growth_curve$size = as.numeric(growth_curve$private) + as.numeric(growth_curve$core) + as.numeric(growth_curve$dispensable)
+growth_curve = growth_curve %>% mutate(core = as.numeric(core)*100/size, private = as.numeric(private)*100/size, dispensable = as.numeric(dispensable)*100/size) %>% reshape2::melt(id.vars = c("sample","community", "chromosome", "size")) %>% group_by(chromosome, variable) %>% dplyr::summarise(mean(as.numeric(value)))
+growth_curve$variable = factor(growth_curve$variable, levels = c("core", "dispensable", "private"))
+
+pdf("../Figures/PG_size_classes_perCHR_compressionratio.pdf", height = 6, width = 8)
+merge(growth_curve, comp_ratio, by.x = "chromosome", by.y = "V4") %>% ggplot(aes(as.numeric(V3)/as.numeric(V2), `mean(as.numeric(value))`, colour = variable)) + geom_point(size = 3) + geom_label_repel(aes(label = chromosome)) + scale_colour_manual(values = c("#0072b2", "orange","#cc79a7")) + theme_bw() + labs(x = "Compression ratio (pangenome size/mean species length)", y = "% of pangenome", colour = "Class")
+dev.off()
+```
+
+## 5A. Compression ratio per chromsome only first haplotypes
+
+```{r, fig.height=7, fig.width=15, echo=FALSE, warning=FALSE}
+
+comp_ratio = NULL
+for (i in seq(0,18,1)[c(-4,-10)]){
+  comm = paste0("community",i)
+  size = read.delim(paste0("../pggb_allcommunities/community",i, ".s5000/community",i, ".sorted.single_haps.stats"), sep = "\t", header = T)[1,]$X.length
+  chromosome = unique(sapply(str_split(read.delim(paste0("../chromosome_sets/", comm, "_unmasked/", comm, ".combined.fasta.fai"), header = F)$V1, "#"), .subset, 3))
+  mean_chr_size = read.delim(paste0("../chromosome_sets/", comm, "_unmasked/", comm, ".combined.fasta.fai"), header = F)[,c(1,2)] %>% mutate(V1 = sapply(str_split(V1, "#"), .subset, 1)) %>% group_by(V1) %>% summarise(V2 = mean(V2)) %>% mutate(V3 = size) %>% mutate(V4 = chromosome)
+  comp_ratio = rbind(comp_ratio, mean_chr_size)
+}
+i=9
+comm = paste0("community9")
+size = read.delim(paste0("../pggb_allcommunities/community",i, ".s5000/community",i, ".sorted.stats"), sep = "\t", header = T)[1,]$X.length
+chromosome = unique(sapply(str_split(read.delim(paste0("../chromosome_sets/", comm, "_unmasked/", comm, ".combined.fasta.fai"), header = F)$V1, "#"), .subset, 3))
+mean_chr_size = read.delim(paste0("../chromosome_sets/", comm, "_unmasked/", comm, ".combined.fasta.fai"), header = F)[,c(1,2)] %>% mutate(V1 = sapply(str_split(V1, "#"), .subset, 1)) %>% group_by(V1) %>% summarise(V2 = mean(V2)) %>% mutate(V3 = size) %>% mutate(V4 = chromosome)
+comp_ratio = rbind(comp_ratio, mean_chr_size)
+
+
+comp_ratio %>% mutate(chromosome_type = if_else(V4 == "Z", "Z", "autosome")) %>% data.frame() %>% ggplot( aes(as.numeric(V3)/as.numeric(V2), chromosome_type )) + geom_boxplot(fill = "skyblue") + theme_linedraw()  + labs(x= "Size of the graph/Size of the chromosome", y = "Chromosome")
+
+comp_ratio$V4 = factor(comp_ratio$V4, levels = c(seq(1,18,1), "Z"))
+ggplot(comp_ratio, aes(as.numeric(V3)/as.numeric(V2), V4 )) + geom_boxplot(fill = "skyblue") + theme_linedraw()  + labs(x= "Size of the graph/Size of the chromosome", y = "Chromosome")
+```
+
+## 5B. Dendorgram per chromosome
+
+```{r, fig.height=7, fig.width=15, echo=FALSE, warning=FALSE}
+all_dendros = NULL
+for (i in seq(0,18,1)){
+  chr = paste0("chr", chr_map[chr_map$community == i,]$chromosome)
+  df = read.delim(paste0("../pggb_allcommunities/community", i, ".s5000/community", i, ".smooth.final.dist.tsv"))
+  jaccard_dist_df <- df %>%
+    arrange(group.a, group.b) %>%
+    select(group.a, group.b, jaccard.distance) %>%
+    pivot_wider(names_from = group.b, values_from = jaccard.distance) %>%
+    column_to_rownames(var = "group.a")
+
+# Clustering
+  jaccard_hc <- as.dist(jaccard_dist_df) %>% hclust()
+  tree = as.phylo(jaccard_hc)
+  all_dendros[[chr]] = tree
+}
+class(all_dendros) <- "multiPhylo"
+sample_map = c(setNames(paste0(sample_data$Organism.Name, "#1"),paste0(sample_data$MyName, "#1")),setNames(paste0(sample_data$Organism.Name, "#2"),paste0(sample_data$MyName, "#2")))
+for (i in seq(1,19,1)){ all_dendros[[i]]$tip.label = unname(unlist(sample_map[all_dendros[[i]]$tip.label]))}
+
+
+pdf("../Figures/Densitree.pdf", width = 8, height = 6)
+densiTree(all_dendros, type = "phylogram", scaleX = TRUE, alpha = 0.1)
+dev.off()
+```
+
+## 6. Node numbers vs node lengths per chromosome in core/dispensable/private
+
+```{r, fig.height=7, fig.width=15, echo=FALSE, warning=FALSE}
+nodes_lengths = NULL
+for (i in seq(0,18,1)){
+  private = read.delim(paste0("../pggb_allcommunities/community", i, ".s5000/community", i, ".sorted.allSpecies.nodes.private"), header = F)
+  private$cat = "private"
+  dispensable = read.delim(paste0("../pggb_allcommunities/community", i, ".s5000/community", i, ".sorted.allSpecies.nodes.dispensable"), header = F)
+  dispensable$cat = "dispensable"
+  core = read.delim(paste0("../pggb_allcommunities/community", i, ".s5000/community", i, ".sorted.allSpecies.nodes.core"), header = F)
+  core$cat = "core"
+  all = rbind(core, private, dispensable)
+  length_nodes = read.delim(paste0("../pggb_allcommunities/community", i, ".s5000/community", i, ".sorted.nodes.fasta.len"), header = F)
+  all = merge(all, length_nodes, by = "V1")
+  all = all %>% group_by(V2,cat) %>% summarise(nodes = n_distinct(V1))
+  all$comm = i
+  nodes_lengths = rbind(all, nodes_lengths)
+}
+pdf("../Figures/Node_length.pdf", width = 6, height = 4)
+nodes_lengths %>% ggplot(aes(as.numeric(V2), as.numeric(nodes), colour = cat)) + geom_point() + scale_x_log10() + scale_y_log10() + labs(x = "Node length (bp)", y = "Frequency") + theme_bw() + scale_colour_manual(values = c("darkcyan", "darkblue","pink3"))
+dev.off()
+```
+
+
+## 7. Graph-based pangenome modelling selfmade
+
+```{r, fig.height=7, fig.width=15, echo=FALSE, warning=FALSE}
+all_odgi=NULL
+for (i in seq(0,18,1)){
+  odgi = read.delim(paste0("../pggb_allcommunities/community", i, ".s5000/growth.curve.csv"), sep = ",")
+  odgi$com = i
+  all_odgi = rbind(odgi, all_odgi)
+}
+
+pdf("../Figures/PG_GrowthCurve.pdf", width = 4, height = 4)
+rbind(all_odgi %>% group_by(class,nb_genomes,com) %>% dplyr::summarise(mean(value)) %>% group_by(class,nb_genomes) %>% dplyr::summarise(sum(`mean(value)`)) %>% mutate(size = `sum(\`mean(value)\`)`/1000000000), all_odgi %>% group_by(class,nb_genomes,com) %>% dplyr::summarise(mean(value))  %>% group_by(nb_genomes) %>% dplyr::summarise(sum(`mean(value)`)) %>% mutate(size = `sum(\`mean(value)\`)`/1000000000)  %>% mutate(class = "total")) %>% ggplot(aes(nb_genomes,size, group = class, colour = class)) + geom_point() +  geom_smooth() + theme_bw() + labs(x= "nth genome", y = "Sequence length (Gbp)") + scale_colour_manual(values = c("#0072b2", "orange", "#cc79a7","black")) + theme(legend.position = "top")
+dev.off()
+
+x = all_odgi %>%
+    group_by(nb_genomes, com, class) %>%
+    mutate(replicate = row_number()) %>%
+    ungroup()
+
+n_comm <- x %>% distinct(com) %>% nrow()
+
+x = x %>% group_by(nb_genomes, class, replicate) %>%
+  filter(n_distinct(com) == n_comm) %>%
+  ungroup()
+
+pdf("../Figures/PG_GrowthCurve.pdf", width = 6, height = 4)
+rbind(rbind(x %>% group_by(nb_genomes, class, replicate) %>% summarise(size = sum(value)/1000000000), data.frame(nb_genomes=c(1,1), class = c("private", "dispensable"), replicate=c(1,1), size = c(0,0))), x %>% group_by(nb_genomes,replicate) %>% summarise(size = sum(value)/1000000000) %>% mutate(class = "total")) %>% ggplot(aes(nb_genomes,size, group = class, colour = class)) + geom_point() +  geom_smooth() + theme_bw() + labs(x= "nth genome", y = "Sequence length (Gbp)") + scale_colour_manual(values = c("darkcyan", "darkblue", "pink3", "black")) + theme(legend.position = "top")
+dev.off()
+
+
+```
+
+## 8. Shared node space between and within haps and clades
+
+```{r, fig.height=7, fig.width=15, echo=FALSE, warning=FALSE}
+
+shared_node_space_haps=NULL
+for (i in c(seq(0,8,1), seq(10,18,1))){
+  df = read.delim(paste0("/home/zajac/pggb_allcommunities/community", i, ".s5000/odgi.sharednodespace.haps.txt"))
+  shared_node_space_haps = rbind(shared_node_space_haps,df)
+}
+shared_node_space_haps = shared_node_space_haps %>% mutate(group.name = sapply(str_split(query, "#"), .subset, 1)) %>% mutate(cat = "Within haplotypes")
+shared_node_space_haps$group.name = factor(shared_node_space_haps$group.name, levels = c("rPodBoc1", "rPodLio1","rPodVau1", "rPodMur119", "rPodSic1", "rPodErh1","rPodGai1","rPodMel1","rPodFil1","rPodTil1","rPodPit1"))
+
+
+
+shared_node_space_clades=NULL
+for (i in seq(0,18,1)){
+  df = read.delim(paste0("/home/zajac/pggb_allcommunities/community", i, ".s5000/odgi.sharednodespace.clades.txt"))
+  shared_node_space_clades = rbind(shared_node_space_clades,df)
+}
+shared_node_space_clades = shared_node_space_clades %>% mutate(group.name = case_when(group.name == "group1" ~ "Muralis", group.name == "group2" ~ "Iberian", group.name == "group3" ~ "Balkan", group.name == "group4" ~ "Sicilian-Maltese", group.name == "group5" ~ "Western Islands", group.name == "group6" ~ "Siculus")) %>% mutate(cat = "Within 6 major clades")
+shared_node_space_clades$group.name = factor(shared_node_space_clades$group.name, levels = c("Iberian","Muralis","Siculus", "Balkan", "Sicilian-Maltese","Western Islands"))
+
+shared_node_space_lin=NULL
+for (i in seq(0,18,1)){
+  df = read.delim(paste0("/home/zajac/pggb_allcommunities/community", i, ".s5000/odgi.sharednodespace.lineages.txt"))
+  shared_node_space_lin = rbind(shared_node_space_lin,df)
+}
+shared_node_space_lin = shared_node_space_lin %>% mutate(group.name = case_when(group.name == "group1" ~ "lineage1", group.name == "group2" ~ "lineage2")) %>% mutate(cat = "")
+shared_node_space_lin$group.name = factor(shared_node_space_lin$group.name, levels = c("lineage1", "lineage2"))
+
+shared = rbind(shared_node_space_haps,shared_node_space_clades,shared_node_space_lin)
+shared = shared %>% mutate(col = case_when(group.name %in% c("lineage1", "Iberian","Muralis","Siculus", "rPodBoc1", "rPodLio1","rPodVau1", "rPodMur119", "rPodSic1") ~ "Iberian/Muralis/Siculus", group.name %in% c("rPodErh1","rPodGai1","rPodMel1","rPodFil1","rPodTil1","rPodPit1", "Balkan", "Sicilian-Maltese","Western Islands", "lineage2") ~ "Balkan/Sicilian-Maltese/Western-Islands"))
+shared$col = factor(shared$col, levels = c("Iberian/Muralis/Siculus", "Balkan/Sicilian-Maltese/Western-Islands"))
+
+ggplot(shared, aes(group.name, overlap.frac, fill = col)) + geom_violin() + facet_grid(~cat, space = "free", scales = "free") + theme_bw() + theme( axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1), legend.position = "top", text = element_text(size = 25)) + labs(x = "", y = "Shared node space", fill = "")
+```
+
+## 9. Shared node space but in the form of circularization
+
+```{r, fig.height=7, fig.width=15, echo=FALSE, warning=FALSE}
+
+df = shared_node_space_haps %>% group_by(`group.name`) %>% dplyr::summarise(mean(overlap.frac)) %>% mutate(group.name1 = paste0(group.name, "#1"), group.name2 = paste0(group.name, "#2"))
+colnames(df) = c("species", "shared_percentage", "haplotype1", "haplotype2")
+metadata = sample_data[,c(16,17)] %>% dplyr::rename("species" = "MyName")
+df <- df %>% left_join(metadata, by = "species") %>% arrange(clade, species)
+df$shared_percentage = df$shared_percentage * 100
+sectors <- c(rbind(df$haplotype1, df$haplotype2))
+
+# Create clade mapping for each sector
+sector_clade <- rep(df$clade, each = 2)
+names(sector_clade) <- sectors
+
+# Set sector sizes
+sector_sizes <- rep(100, length(sectors))
+names(sector_sizes) <- sectors
+
+# Create link data - connecting haplotype pairs
+links <- data.frame(
+    from = df$haplotype1,
+    to = df$haplotype2,
+    value = df$shared_percentage
+)
+
+# Color gradient based on shared percentage
+col_fun <- colorRamp2(c(75, 95), 
+                      c("#3498db", "#e74c3c"))
+
+# Clade colors for the outer track
+clade_colors <- c("purple","palegreen3",  "blue3","yellow", "green", "magenta2")
+
+pdf("../Figures/cirlize_haplotypes_shared_space.pdf", width = 12, height = 8)
+circos.clear()
+circos.par(
+  start.degree = 90,
+  gap.degree = c(rep(1, length(sectors) - 1), 8),  # Larger gap at the end
+  track.margin = c(0.01, 0.01),
+  cell.padding = c(0.02, 0, 0.02, 0)
+)
+
+# Initialize with sectors
+circos.initialize(factors = sectors, xlim = cbind(rep(0, length(sectors)), sector_sizes))
+
+# Track 1: Clade labels (outermost)
+circos.track(
+  factors = sectors,
+  ylim = c(0, 1),
+  track.height = 0.08,
+  bg.border = NA,
+  panel.fun = function(x, y) {
+    sector.name = get.cell.meta.data("sector.index")
+    clade = sector_clade[sector.name]
+    
+    # Add clade color background
+    circos.rect(0, 0, get.cell.meta.data("xlim")[2], 1, 
+                col = clade_colors[clade], border = "white", lwd = 0.5)
+  }
+)
+
+# Add clade labels (only once per clade group)
+clade_positions <-df %>%
+    group_by(clade) %>%
+    summarise(
+        start_sector = dplyr::first(haplotype1),
+        end_sector = dplyr::last(haplotype2),
+        .groups = 'drop'
+    )
+
+for(i in 1:nrow(clade_positions)) {
+  # Get the start and end positions for this clade
+  start_sector <- clade_positions$start_sector[i]
+  end_sector <- clade_positions$end_sector[i]
+  
+  # Calculate middle angle
+  start_deg <- get.cell.meta.data("cell.start.degree", sector.index = start_sector, track.index = 1)
+  end_deg <- get.cell.meta.data("cell.end.degree", sector.index = end_sector, track.index = 1)
+  mid_deg <- (start_deg + end_deg) / 2
+  
+}
+
+# Track 2: Haplotype labels and scale
+circos.track(
+  factors = sectors,
+  ylim = c(0, 1),
+  track.height = 0.15,
+  bg.border = NA,
+  panel.fun = function(x, y) {
+    sector.name = get.cell.meta.data("sector.index")
+    
+    # Add sector background color
+    if(grepl("#1", sector.name)) {
+      circos.rect(0, 0, get.cell.meta.data("xlim")[2], 1, 
+                  col = "#34495e", border = "white", lwd = 0.5)
+    } else {
+      circos.rect(0, 0, get.cell.meta.data("xlim")[2], 1, 
+                  col = "#2c3e50", border = "white", lwd = 0.5)
+    }
+    
+    # Add axis with scale
+    circos.axis(h = "top", 
+                major.at = seq(0, 100, by = 20),
+                labels.cex = 0.4,
+                labels.niceFacing = TRUE,
+                minor.ticks = 1)
+    
+    # Add sector labels (haplotype names)
+    circos.text(
+      x = get.cell.meta.data("xlim")[2]/2,
+      y = 0.5,
+      labels = gsub("_", " ", sector.name),
+      cex = 0.5,
+      facing = "bending.inside",
+      niceFacing = TRUE,
+      col = "white",
+      font = 2
+    )
+  }
+)
+
+# Add links between haplotype pairs
+for(i in 1:nrow(links)) {
+  # Get color for this link
+  link_col <- col_fun(links$value[i])
+  
+  circos.link(
+    sector.index1 = links$from[i],
+    point1 = c(0, links$value[i]),  # Width represents shared space
+    sector.index2 = links$to[i],
+    point2 = c(0, links$value[i]),
+    col = link_col,
+    border = NA,
+    h.ratio = 0.6  # Height of the link curve
+  )
+}
+
+# Add legend for color scale
+lgd = Legend(
+  at = seq(floor(75), ceiling(95), length.out = 5),
+  col_fun = col_fun,
+  title = "Shared Node\nSpace (%)",
+  title_gp = gpar(fontsize = 10, fontface = "bold"),
+  labels_gp = gpar(fontsize = 8),
+  legend_height = unit(3, "cm"),
+  grid_width = unit(0.5, "cm")
+)
+
+# Draw legend
+pushViewport(viewport(x = 0.85, y = 0.5))
+grid.draw(lgd)
+upViewport()
+
+circos.clear()
+dev.off()
+# Print summary statistics by clade
+cat("\nSummary of Shared Node Space by Clade:\n")
+df %>%
+  group_by(clade) %>%
+  summarise(
+    n_species = n(),
+    mean_shared = round(mean(shared_percentage), 2),
+    min_shared = round(min(shared_percentage), 2),
+    max_shared = round(max(shared_percentage), 2),
+    .groups = 'drop'
+  ) %>%
+  print()
+
+pdf("../Figures/cirlize_haplotypes_shared_space_barplot.pdf", height = 5,width = 10)
+merge(df, sample_data[,c(3,17)], by.x = "species", by.y = "MyName") %>% ggplot(aes(shared_percentage, factor(Organism.Name, levels = merge(df, sample_data[,c(3,17)], by.x = "species", by.y = "MyName") %>% arrange(clade) %>% pull(Organism.Name)), fill = clade)) + geom_col() + theme_bw() + scale_fill_manual(values = c( "purple","palegreen3","blue3","yellow","green", "magenta2")) + theme( axis.text.y = element_text(size = 15,face = "italic"), axis.text.x = element_text(size = 15)) + labs(x = "Shared node space (%)", y = "")
+dev.off()
+```
+
+
+```{r, fig.height=7, fig.width=15, echo=FALSE, warning=FALSE}
+
+df = shared_node_space_clades %>% mutate(chr = sapply(str_split(query,"#"), .subset, 3)) %>% mutate(query = paste0(sapply(str_split(query,"#"), .subset, 1), "#", sapply(str_split(query,"#"), .subset, 2))) %>% mutate(target = paste0(sapply(str_split(target,"#"), .subset, 1), "#", sapply(str_split(target,"#"), .subset, 2)))
+df = df %>% group_by(group.name, query,target) %>% dplyr::summarise(overlap.frac = mean(overlap.frac) * 100)
+colnames(df) = c("clade", "haplotype1", "haplotype2", "shared_percentage")
+df = df[sapply(str_split(df$haplotype1,"#"), .subset, 1) != sapply(str_split(df$haplotype2,"#"), .subset, 1),]
+
+species_haplotypes = data.frame(genome= unique(c(df$haplotype1, df$haplotype2))) %>% mutate(species = sapply(str_split(genome,"#"), .subset, 1)) %>% group_by(species) %>% summarise(n_haps = n_distinct(genome))
+all_haplotypes = unique(c(df$haplotype1, df$haplotype2))
+
+df$species1 = sapply(str_split(df$haplotype1,"#"), .subset, 1)
+df$species2 = sapply(str_split(df$haplotype2,"#"), .subset, 1)
+
+species_info <- species_haplotypes %>%
+    left_join(metadata, by = "species") %>%
+    arrange(clade, species)
+species_info = unique(species_info)
+
+sectors <- unlist(lapply(1:nrow(species_info), function(i) {
+    sp <- species_info$species[i]
+    n <- species_info$n_haps[i]
+    if(n == 1) {
+        paste0(sp, "#1")
+    } else {
+        c(paste0(sp, "#1"), paste0(sp, "#2"))
+    }
+}))
+sectors = unique(sectors)
+
+sector_info <- data.frame(
+    sector = sectors,
+    species = rep(species_info$species, species_info$n_haps),
+    clade = rep(species_info$clade, species_info$n_haps),
+    stringsAsFactors = FALSE
+)
+
+sector_sizes <- rep(100, length(sectors))
+names(sector_sizes) <- sectors
+
+# Color gradient based on shared percentage
+col_fun <- colorRamp2(c(75, 95), 
+                      c("#3498db", "#e74c3c"))
+
+clade_colors <- c("purple","palegreen3",  "blue3","yellow", "green", "magenta2")
+
+gaps <- sapply(1:(length(sectors)-1), function(i) {
+    current_sp <- sector_info$species[i]
+    next_sp <- sector_info$species[i+1]
+    current_clade <- sector_info$clade[i]
+    next_clade <- sector_info$clade[i+1]
+    
+    if(current_clade != next_clade) {
+        return(8)  # Large gap between clades
+    } else if(current_sp != next_sp) {
+        return(3)  # Medium gap between species
+    } else {
+        return(0.5)  # Small gap between haplotypes of same species
+    }
+})
+gaps <- c(gaps, 10) 
+
+pdf("../Figures/cirlize_clades_shared_space.pdf", width = 12, height = 8)
+circos.clear()
+circos.par(
+  start.degree = 90,
+  gap.degree = gaps,
+  track.margin = c(0.01, 0.01),
+  cell.padding = c(0.02, 0, 0.02, 0)
+)
+circos.initialize(factors = sectors, xlim = cbind(rep(0, length(sectors)), sector_sizes))
+circos.track(
+  factors = sectors,
+  ylim = c(0, 1),
+  track.height = 0.08,
+  bg.border = NA,
+  panel.fun = function(x, y) {
+    sector.name = get.cell.meta.data("sector.index")
+    clade = sector_info$clade[sector_info$sector == sector.name]
+    
+    # Add clade color background
+    circos.rect(0, 0, get.cell.meta.data("xlim")[2], 1, 
+                col = clade_colors[clade], border = "white", lwd = 0.5)
+  }
+)
+clade_positions <- sector_info %>%
+    group_by(clade) %>%
+    summarise(
+        start_sector = dplyr::first(sector),
+        end_sector = dplyr::last(sector),
+        .groups = 'drop'
+    )
+
+# Track 2: Haplotype labels and scale
+circos.track(
+    factors = sectors,
+    ylim = c(0, 1),
+    track.height = 0.15,
+    bg.border = NA,
+    panel.fun = function(x, y) {
+        sector.name = get.cell.meta.data("sector.index")
+        
+        # Add sector background color
+        if(grepl("#1", sector.name)) {
+            circos.rect(0, 0, get.cell.meta.data("xlim")[2], 1, 
+                        col = "#34495e", border = "white", lwd = 0.5)
+        } else {
+            circos.rect(0, 0, get.cell.meta.data("xlim")[2], 1, 
+                        col = "#2c3e50", border = "white", lwd = 0.5)
+        }
+        
+        # Add axis with scale
+        circos.axis(h = "top", 
+                    major.at = seq(0, 100, by = 20),
+                    labels.cex = 0.4,
+                    labels.niceFacing = TRUE,
+                    minor.ticks = 1)
+        
+        # Add sector labels (haplotype names)
+        circos.text(
+            x = get.cell.meta.data("xlim")[2]/2,
+            y = 0.5,
+            labels = gsub("_", " ", sector.name),
+            cex = 0.5,
+            facing = "bending.inside",
+            niceFacing = TRUE,
+            col = "white",
+            font = 2
+        )
+    }
+)
+
+# Add links between haplotypes
+for(i in 1:nrow(df)) {
+    # Get color for this link
+    link_col <- col_fun(df$shared_percentage[i])
+    
+    circos.link(
+        sector.index1 = df$haplotype1[i],
+        point1 = c(0, df$shared_percentage[i]),
+        sector.index2 = df$haplotype2[i],
+        point2 = c(0, df$shared_percentage[i]),
+        col = link_col,
+        border = NA,
+        h.ratio = 0.6
+    )
+}
+
+# Add legend for color scale
+lgd = Legend(
+    at = seq(floor(75), ceiling(95), length.out = 5),
+    col_fun = col_fun,
+    title = "Shared Node\nSpace (%)",
+    title_gp = gpar(fontsize = 10, fontface = "bold"),
+    labels_gp = gpar(fontsize = 8),
+    legend_height = unit(3, "cm"),
+    grid_width = unit(0.5, "cm")
+)
+
+# Draw legend
+pushViewport(viewport(x = 0.85, y = 0.5))
+grid.draw(lgd)
+upViewport()
+dev.off()
+# Print summary statistics
+cat("\nSpecies Haplotype Summary:\n")
+species_info %>%
+  group_by(clade) %>%
+  summarise(
+    n_species = n(),
+    species_with_1_hap = sum(n_haps == 1),
+    species_with_2_haps = sum(n_haps == 2),
+    .groups = 'drop'
+  ) %>%
+  print()
+
+cat("\nInter-species Shared Node Space Summary:\n")
+print(summary(df$shared_percentage))
+
+pdf("../Figures/cirlize_clades_shared_space_boxplot.pdf", height = 6,width = 8)
+df %>% group_by(species1,species2, clade) %>% summarise(shared_percentage = mean(shared_percentage)) %>% ggplot(aes(shared_percentage, clade, fill = clade)) + geom_boxplot() + theme_bw() + scale_fill_manual(values = c("magenta2", "green", "purple","palegreen3",  "blue3")) + theme(legend.position = "", axis.text.y = element_text(size = 15), axis.text.x = element_text(size = 15)) + labs(x = "Shared node space (%)", y = "")
+dev.off()
+```
+
+
+## 10. Phylogenetically congruent dispensable nodes - visualising 04_parsimonious.dispnodes.R
+
+```{r, fig.height=7, fig.width=15, echo=FALSE, warning=FALSE}
+
+all_nonp = NULL
+for (i in list.files("../pggb_allcommunities/", pattern = "nonparsimonious*", recursive = T)){
+  df = read.delim(paste0("../pggb_allcommunities/",i))
+  if (is.null(all_nonp)){
+    all_nonp = df
+  } else {
+   all_nonp = merge(all_nonp, df, by = "genome", all = TRUE) 
+  }
+}
+all_nonp = data.frame(nonp_genome = rowSums(all_nonp %>% column_to_rownames("genome")))
+genom_size = NULL
+for (i in list.files("/groups/mpistaff/Zajac/genomes/ncbi_dataset/data/ALL_corrected_unmasked/", pattern = "*.fai")) {
+  name = str_remove(i, ".all.fasta.fai")
+  value = as.character(tail(read_delim(paste0("/groups/mpistaff/Zajac/genomes/ncbi_dataset/data/ALL_corrected_unmasked/", i)), n = 1)[,3])
+  df = data.frame("hap" = name, "size" = value)
+  genom_size = rbind(genom_size, df)
+}
+all_nonp = merge(all_nonp %>% rownames_to_column("genome"), genom_size %>% mutate(genome = sapply(str_split(hap, "#"), .subset, 1)) %>% group_by(genome) %>% summarise(size = mean(as.numeric(size))), by = "genome") %>% mutate(perc = (nonp_genome * 100)/size)
+sample_data = read.delim("/groups/mpistaff/Zajac/genomes/sample_data.tsv")
+all_nonp = merge(all_nonp, sample_data[,c(3,17)], by.x = "genome", by.y = "MyName") %>% unique()
+all_nonp$Organism.Name = factor(all_nonp$Organism.Name, levels = c("Podarcis cretensis", "Podarcis erhardii", "Podarcis gaigeae", "Podarcis melisellensis","Podarcis filfolensis", "Podarcis raffonei" , "Podarcis lilfordi", "Podarcis pityusensis", "Podarcis tiliguerta", "Podarcis siculus",  "Podarcis muralis", "Podarcis muralis nigriv.", "Podarcis liolepis", "Podarcis bocagei" ,"Podarcis vaucheri"))
+
+pdf("../Figures/Phylogenetically_disc_disp_genome.pdf", height = 6, width = 6)
+all_nonp %>% ggplot(aes(perc, Organism.Name)) + geom_col(colour = "black", fill = "black") + theme_bw() + theme(text = element_text(size = 20), axis.text.y = element_text(face = "italic"), title = element_text(size = 9))  + labs(x = "Percentage of genome size", y = "Species") + ggtitle("Phylogenetically discordant dispensable genome")
+dev.off()
+
+pdf("../Figures/disc_disp_genome_vs_priv.pdf", height = 6, width = 9)
+merge(growth_curve[,c(1,3)], all_nonp, by.x = "sample", by.y = "Organism.Name") %>% mutate(perc_priv = (private * 100)/size) %>% ggplot(aes(perc, perc_priv)) + geom_point(size = 3) + theme_bw() + labs(y = "Percentage of private genome",x = "Percentage of phylogenetically discordant dispensable genome") + theme(text = element_text(size = 20)) + geom_smooth(method=lm , color="red", se=FALSE) + stat_cor()
+dev.off()
+
+## Load parsimonious nodes
+sample_data = read.delim("/groups/mpistaff/Zajac/genomes/sample_data.tsv")
+pars_nodes = NULL
+for (i in list.files("../pggb_allcommunities/", pattern = "parsimonious_dispnodes.gains.losses.txt", recursive = T)){
+  dispnodes = read.delim(paste0("../pggb_allcommunities/", i))
+  if (is.null(pars_nodes)){
+    pars_nodes = dispnodes
+  } else {
+    pars_nodes = merge(pars_nodes, dispnodes[,c(4,10,11)], by = "label")
+    pars_nodes$gains = pars_nodes$gains.x + pars_nodes$gains.y
+    pars_nodes$losses = pars_nodes$losses.x + pars_nodes$losses.y
+    pars_nodes = pars_nodes[,c(1:9,14,15)]
+  }
+}
+tree = ape::read.tree("/groups/mpistaff/Zajac/genomes/pruned_tree.assembly_names.nwk")
+p <- ggtree(tree) 
+p$data = merge(p$data, pars_nodes, by = colnames(pars_nodes)[c(2:9)])
+p$data = merge(sample_data[,c(3,17)], p$data, by.y = "label.x", by.x = "MyName", all.y = TRUE) %>% mutate(label = if_else(grepl("Node", label.y), label.y, Organism.Name)) %>% dplyr::select(3:10,12:14)
+p$data = p$data %>% unique()
+
+pdf("../Figures/Disp_nodes_phylogenetically_congruent_tree.pdf", width = 15, height = 11)
+p +
+    geom_tiplab(offset = 0.02, size = 5, fontface = "italic") +
+    
+    geom_point(data = p$data,
+               aes(x = x, size = gains),
+               shape = 21,
+               fill = "darkgreen",
+               color = "black",
+               alpha = 0.85
+    ) +
+    
+    geom_point( data = p$data,
+                aes(x = x - dx, size = losses),
+                shape = 21,
+                fill = "lightgreen",
+                color = "black",
+                alpha = 0.85
+    ) +
+    
+    geom_label(
+        aes(
+            label = paste0("+", gains, " / −", losses)
+        ),
+        size = 5,
+        vjust = -0.8,
+        fill = "beige"
+    ) +
+    
+    theme_tree2() +
+    xlim(0, 0.24) +
+    scale_size_continuous(
+        range = c(1.5, 8),
+        name = "Number of events (Mio)"
+    ) +
+    theme(text = element_text(face = "italic"))
+dev.off()
+```
+
+## 11. Dispensable nodes - how many shared between how many species
+
+```{r, fig.height=7, fig.width=15, echo=FALSE, warning=FALSE}
+
+genome_distribution_all = data.frame(nb_species = seq(2,14,1))
+nb_nodes_only_one_species_missing_all = data.frame(rowname = sample_data$MyName[c(1:2,4,6:13,15:18)])
+for (i in seq(0,18,1)[17:18]){
+    files = list.files(paste0("../pggb_allcommunities/community", i, ".s5000/"), pattern = ".paths", full.names = T)[!grepl("#|all|sorted.paths", list.files(paste0("../pggb_allcommunities/community", i, ".s5000/"), pattern = ".paths"))]
+  disp = list.files(paste0("../pggb_allcommunities/community", i, ".s5000/"), pattern = "dispensable", full.names = T)
+  disp = fread(disp, header = F)
+  
+  dt_list <- lapply(files, function(i) {
+    name <- str_split(i, "\\.")[[1]][6]
+    x <- fread(i, header = FALSE)
+    x[, (name) := 1]
+    x[, .SD, .SDcols = c("V1", name)]
+  })
+  
+  all_files <- rbindlist(dt_list, fill = TRUE)
+  all_files <- all_files[, lapply(.SD, max, na.rm = TRUE), by = V1]
+  
+  disp <- merge(disp, all_files, by = "V1", all.x = TRUE)
+  for (j in setdiff(names(disp), "V1")) {
+    set(disp, which(is.na(disp[[j]])), j, 0)
+  }
+  disp = disp %>% column_to_rownames("V1")
+  disp = disp %>% dplyr::rename("rPodCre2.1" = "rPodCre2") %>% dplyr::rename("rPodLil1.2" = "rPodLil1") 
+  disp$nb_species = rowSums(disp)
+  
+  genome_distribution = disp %>% group_by(nb_species) %>% summarise(count = n())
+  colnames(genome_distribution) = c("nb_species", paste0("community", i))
+  genome_distribution_all = merge(genome_distribution_all, genome_distribution, by = "nb_species", all = TRUE)
+  
+  nb_nodes_only_one_species_missing = data.frame(value = colSums(disp[disp$nb_species == 14,] == 0)) %>% rownames_to_column() %>% filter(!rowname %in% c("nb_species"))
+  colnames(nb_nodes_only_one_species_missing) = c("rowname", paste0("community", i))
+  nb_nodes_only_one_species_missing_all = merge(nb_nodes_only_one_species_missing_all, nb_nodes_only_one_species_missing, by = "rowname", all = TRUE)
+}
+
+#Which species have the most disp nodes where it is missing
+nb_nodes_only_one_species_missing_all %>% reshape2::melt(id.vars = "rowname") %>% dplyr::rename("community" = "variable", "MyName" = "rowname")  %>% left_join(chr_map) %>% left_join(sample_data[,c(3,16,17)]) %>% unique() %>% ggplot(aes(value,Organism.Name, fill = chromosome)) + geom_col() + theme_bw() + scale_fill_manual(values = brewPalette(n = 19)) + facet_grid(clade~., space = "free", scales = "free") + labs(x = "Dispensable nodes missing only in this species", y = "")
+
+#Check how many nodes have how many species
+genome_distribution_all %>% reshape2::melt(id.vars = "nb_species") %>% dplyr::rename("community" = "variable") %>% left_join(chr_map) %>% ggplot(aes(nb_species, value, fill = chromosome)) + geom_col() + scale_fill_manual(values = brewPalette(n=19)) + theme_bw() + labs(x = "Number of species", y  = "Number of dispensable nodes") + theme(text = element_text(size = 14))
+
+#Compare the busco scores with number of disp nodes where only this species is missing
+busco_results = read.delim("/groups/mpistaff/Zajac/analyses/BUSCO/summary.txt")
+nb_nodes_only_one_species_missing_all %>% reshape2::melt(id.vars = "rowname") %>% dplyr::rename("community" = "variable", "MyName" = "rowname")  %>% left_join(chr_map) %>% left_join(sample_data[,c(3,16,17)]) %>% left_join(busco_results %>% separate(Genome, into = c("MyName", "haplotype"), sep = "#") %>% group_by(MyName) %>% summarise(Complete_Busco = mean(Complete_Busco))) %>% unique() %>% group_by(MyName, Organism.Name, clade) %>% summarise(Complete_Busco = mean(Complete_Busco), value = sum(value)) %>% ggplot(aes(Complete_Busco, value, colour = Organism.Name)) + geom_point(size = 4) + scale_colour_manual(values = brewPalette(15)) + theme_bw() + labs(y = "Number of dispensable nodes missing only in that species", x = "Complete BUSCO % (genomic)", colour = "Species Name") + theme(text = element_text(size = 14))
+
+#Percentage of disp nodes per species where it is the only one missing
+for (i in seq(0,18,1)) {value = as.numeric(system(paste("cat", paste0("../pggb_allcommunities/community", i, ".s5000/community", i ,".sorted.allSpecies.nodes.dispensable"), "| wc -l"), intern = TRUE)); comm = paste0("community",i); res = rbind(res, data.frame("community"= comm, value = value))}
+merge(nb_nodes_only_one_species_missing_all %>% reshape2::melt(id.vars = "rowname") %>% dplyr::rename("community" = "variable", "MyName" = "rowname"), res, by = "community") %>% mutate(perc = (value.x  * 100) / value.y) %>% left_join(chr_map) %>% left_join(sample_data[,c(3,16,17)]) %>% unique() %>% ggplot(aes(perc,Organism.Name, colour = chromosome)) + geom_point() + theme_bw() + scale_colour_manual(values = brewPalette(n = 19)) + facet_grid(clade~., space = "free", scales = "free") + labs(x = "Percentage of dispensable nodes missing only in this species", y = "") + theme(text = element_text(size = 14))
+
+#How many nodes each clade shares with Tiliguerta
+df = merge(disp[disp$rPodTil1 == 1,c(1:15)] %>% rownames_to_column("node") %>% reshape2::melt(id.vars = "node") %>% filter(value == 1), sample_data[,c(16,17)], by.x = "variable", by.y = "MyName") 
+df = df %>% unique()
+df %>% group_by(clade) %>% summarise(n_distinct(node))
+
+```
+
+## 12. Order of disp/private/core nodes
+
+```{r, fig.height=7, fig.width=15, echo=FALSE, warning=FALSE}
+#This is for one genome - this is run as a separate script 06_label_nodes_by_order_on_chr.R
+# files = list.files("../pggb_allcommunities/", pattern = "*PodMur1#1#", recursive = TRUE)
+# chr_map = read.delim("../chromosome_sets/community.chr.map")
+# df_all_chr = NULL
+# for (i in files){
+#   comm = sapply(str_split(i, "/"), .subset, 1)
+#   chr = chr_map[chr_map$community == str_remove(str_remove(comm, "community"), ".s5000"),]$chromosome
+#   dispensable = list.files(paste0("../pggb_allcommunities/", comm), pattern = "nodes.dispensable", full.names = T)
+#   dispensable = read.delim(dispensable, header = F)
+#   private = list.files(paste0("../pggb_allcommunities/", comm), pattern = "nodes.private",full.names = T)
+#   private = read.delim(private, header = F)
+#   core = list.files(paste0("../pggb_allcommunities/", comm), pattern = "nodes.core",full.names = T)
+#   core = read.delim(core, header = F)
+#   len = list.files(paste0("../pggb_allcommunities/", comm), pattern = ".sorted.nodes.fasta.len",full.names = T)
+#   len = read.delim(len, header = F)
+#   df = read.delim(paste0("../pggb_allcommunities/", i), header = F)
+#   colnames(df) = c("V1", "orientiation")
+#   df = df %>% left_join(rbind(dispensable %>% mutate(cat = "dispensable"), private %>% mutate(cat = "private"), core %>% mutate(cat = "core"))) %>% left_join(len) 
+#   df = df %>% mutate(block = cumsum(cat != lag(cat, default = first(cat)))) %>%
+#     group_by(block, cat) %>%
+#     summarise(V2 = sum(V2), segment_id = paste(V1, collapse = ","), .groups = "drop") %>% 
+#     ungroup() %>% 
+#     mutate(start = c(1, head(cumsum(V2), -1) + 1)) %>% mutate(end = cumsum(V2)) %>% 
+#     mutate(chr = chr)
+#   df_all_chr[[comm]] = df
+# }
+
+df = read.delim("../PhyloTree/GenomicMosaicism/community9.sorted.PodMur1#1#Z.paths.order.length.txt")
+
+df %>% 
+  ggplot(aes(x = start, xend = end, y = 1, yend = 1, colour = cat )) + 
+  geom_segment(linewidth = 7) +
+  scale_color_manual(
+    values = c(
+      private = "pink3",
+      dispensable = "darkblue",
+      core = "darkcyan"))
+```
+
+## 13. TEs in private/disp/core
+
+```{r, fig.height=7, fig.width=15, echo=FALSE, warning=FALSE}
+all_Tes = NULL
+for (i in list.files("../Species_Specific_Masking/for_pggb/", pattern = "classification", full.names = T)){
+  df = read.delim(i)
+  df = df %>% separate(chr, into = c("species", "haplotype", "chr"), sep = "#")
+  all_Tes = rbind(all_Tes, df)
+}
+all_Tes$TEclass =  str_remove(sapply(str_split(all_Tes$TE, "_"), .subset, 1), "\\?")
+all_Tes = rbind(all_Tes %>% group_by(TEclass,cat,species,haplotype,chr) %>% dplyr::summarise(length = sum(length), total_length = mean(total_length)) %>% mutate(perc = length*100/total_length) %>% dplyr::select(c(1:5,8)), unique(all_Tes[,c(-5,-6,-9)]) %>% mutate(perc = exact_overlap*100/total_length) %>% dplyr::select(c(1:4,7)) %>% mutate(TEclass = "total"))
+all_Tes = all_Tes %>% left_join(data.frame("TE_class" = c("ClassII: DNA Transposon", "ClassI: LINE", "ClassI: LTR", "ClassI: Low complexity", "Penelope-like", "ClassII: Rolling-circle", "ClassI: Retrotransposon", "ClassI: SINE", "Satellite repeats", "Simple repeats", "rRNA", "snRNA", "tRNA", "ALL"), "TEclass" = unique(all_Tes$TEclass)))
+all_Tes$TE_class = factor(all_Tes$TE_class, levels = unique(all_Tes$TE_class))
+pdf("../Figures/PG_TEandREpeats.pdf", width = 9, height = 5)
+all_Tes %>% mutate(pang = if_else(TE_class == "ALL", "ALL", "Repeats/TEs")) %>% ggplot(aes(TE_class, perc, fill = cat)) + geom_boxplot(outliers = F) + theme_bw() + labs(x = "", y = "Repeat density (%)", fill = "Pangenome Class") + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1), text = element_text(size = 15))  + scale_fill_manual(values = c("#0072b2", "orange","#cc79a7")) + facet_grid(~pang, scales = "free", space = "free") 
+dev.off()
+```

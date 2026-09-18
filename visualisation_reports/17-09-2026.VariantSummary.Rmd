@@ -1,0 +1,234 @@
+---
+title: "Variants - basic stats"
+author: "Natalia Zajac"
+date: "15/09/2026"
+output:
+  html_document: 
+    highlight: pygments
+    theme: sand
+    code_folding: true
+    toc: true
+    toc_float: true
+---
+
+# This notebook aims to evaluate and analyse SV data
+
+```{r setup, echo=FALSE, include=FALSE, warning=FALSE}
+library(vcfR)
+library(utils)
+library(dplyr)
+library(tidyverse)
+library(reshape2)
+library(cowplot)
+library(patchwork)
+library(ezRun)
+library(ggbeeswarm)
+library(data.table)
+library(DT)
+library(phangorn)
+source("functions.R")
+
+sample_data = read.delim("/groups/mpistaff/Zajac/genomes/sample_data.tsv")
+sample_data$clade=factor(sample_data$clade,levels=c("Balkan","Sicilian-Maltese","Western","Siculus","Muralis","Iberian"))
+
+#Load P.cretensis bed file - main
+bed = read.delim("/groups/mpistaff/Zajac/genomes/ncbi_dataset/data/ALL_corrected_unmasked/rPodCre2.1#1.all.fasta.fai", header = F)
+bed$Start = 1
+bed = bed[,c(1,6,2)]
+colnames(bed) = c("Chr", "Start", "End")
+
+chr_map = read.delim("../chromosome_sets/community.chr.map")
+
+#Load also other bed files
+beds = list.files("/groups/mpistaff/Zajac/genomes/ncbi_dataset/data/ALL_corrected_unmasked/", pattern = "fai", full.names = TRUE)
+beds = lapply(beds, function(x){ 
+  bed = read.delim(x, header = F)
+  bed$Start = 1
+  bed = bed[,c(1,6,2)]
+  colnames(bed) = c("Chr", "Start", "End")
+  bed  = bed %>% separate(Chr, into = c("species",  "haplotype", "chromosome"), sep = "#")
+  return(bed)
+})
+beds = bind_rows(beds)
+
+# large SVs
+all_comb = NULL
+for (i in list.files("../SV_intersects/largeSVs/", pattern = "merged.DEFAULT")[!grepl("annot",list.files("../SV_intersects/largeSVs/", pattern = "merged.DEFAULT"))]){
+    comb = read.vcfR(paste0("../SV_intersects/largeSVs/", i))
+    comb = cbind(data.frame(comb@fix), data.frame(comb@gt))
+    comb = comb %>% 
+      mutate(countALT = nchar(ALT), countN = str_count(ALT, "N")) %>% 
+      mutate(perc = countN/countALT) %>% filter(perc < 0.5) 
+    comb = comb %>% dplyr::mutate(across(10:23, ~ str_remove(., ":.*"))) %>% 
+        mutate(REFLEN = nchar(REF), ALTLEN = nchar(ALT)) %>% 
+        mutate(SVTYPE = sub(".*SVTYPE=([^;]+).*", "\\1", INFO),
+               TYPE=sub(".*;TYPE=([^;]+).*", "\\1", INFO),
+               AVG_LEN = sub(".*AVG_LEN=([^;]+).*", "\\1", INFO), 
+               AVG_START = sub(".*AVG_START=([^;]+).*", "\\1", INFO), 
+               AVG_END = sub(".*AVG_END=([^;]+).*", "\\1", INFO)) %>% 
+        mutate(SVTYPE = case_when(SVTYPE == "INS" ~ "INS", 
+               SVTYPE == "DEL" ~ "DEL", 
+               (!SVTYPE %in% c("INS", "DEL")) &  !is.na(TYPE) ~ TYPE, 
+               (!SVTYPE %in% c("INS", "DEL")) &  is.na(TYPE) ~ "NA"))
+    comb = comb[,c(1,2,3,10:23,27:33)]
+    comb = comb %>% dplyr::mutate(across(colnames(comb)[4:17], ~ case_when(. == "0|0" ~ 0, . == "0" ~ 0, . == "1|1" ~ 1, . == "1" ~ 1,  . == "0|1" ~ 1, . == "1|0" ~ 1, . == ".|1" ~ 1, . == "0|."~ 0, . == ".|0" ~ 0, . == "1|." ~ 1 )))
+    all_comb[[i]] = comb
+}
+all_comb = bind_rows(all_comb)
+countSVsp = 
+  rbind(data.frame("count" = colSums(all_comb[all_comb$SVTYPE == "INS",c(4:17)])) %>% 
+          rownames_to_column("species") %>%  
+          mutate(species = sapply(str_split(species,"_"), .subset, 3)) %>% 
+          mutate(SVTYPE = "INS"), data.frame("count" = colSums(all_comb[all_comb$SVTYPE == "DEL",c(4:17)])) %>% 
+          rownames_to_column("species") %>%  
+          mutate(species = sapply(str_split(species,"_"), .subset, 3)) %>% 
+          mutate(SVTYPE = "DEL"))
+countSVchr = 
+  all_comb %>% 
+  group_by(CHROM, SVTYPE) %>% 
+  dplyr::summarise(count = n_distinct(POS,REFLEN,ALTLEN)) %>% 
+  filter(SVTYPE %in% c("INS", "DEL"))
+number_singletons = 
+  data.frame("singletons" = colSums(all_comb[,c(4:17)][rowSums(all_comb[,c(4:17)] != "0") == 1,] != "0"))
+densitySVchr =  
+  merge(countSVchr, bed, by.x = "CHROM", by.y = "Chr") %>% 
+  mutate(density = count*100000/End)
+all_comb$LEN = abs(all_comb$ALTLEN - all_comb$REFLEN)
+lenSVsp = 
+  all_comb[,c(4:17,20,25)] %>% 
+  reshape2::melt(id.vars = c("LEN", "SVTYPE")) %>% 
+  filter(value == 1) %>% group_by(variable, SVTYPE) %>% 
+  dplyr::summarise(total_length = sum(LEN)) %>% 
+  filter(SVTYPE != "mnp") %>%  
+  mutate(species = sapply(str_split(variable,"_"), .subset, 3)) %>% 
+  ungroup() %>% 
+  dplyr::select(4,2,3)
+
+# MNPs
+countMNPsp = 
+  read.delim("../pggb_allcommunities/general_stats/MNPS.txt", header = F) %>% group_by(V2) %>% dplyr::summarise(count = sum(V3)) %>% dplyr::rename("species" = "V2")
+countMNPsp$SVTYPE = "MNP"
+countMNPchr = 
+  read.delim("../pggb_allcommunities/general_stats/MNPs.perchr.txt", header = F)
+countMNPchr$V1 = paste0("rPodCre2.1#1#", chr_map[match(str_remove(str_remove(countMNPchr$V1, ".s5000/"), "community"), chr_map$community),]$chromosome)
+colnames(countMNPchr) = c("CHROM", "count")
+densityMNPchr =  
+  merge(countMNPchr, bed, by.x = "CHROM", by.y = "Chr") %>% 
+  mutate(density = count*100000/End, SVTYPE = "MNP") 
+lenMNPsp = 
+  read.delim("../pggb_allcommunities/general_stats/total_length.persp.MNPs.txt")
+lenMNPsp$SVTYPE = "MNP"
+
+# SNPs - temp
+snpfiles = 
+  list.files("../pggb_allcommunities/", "merged.supported.pggb.waved.norm.SNP.txt", recursive = T, full.names = T)
+countSNPchr = NULL
+countSNPsp = NULL
+for (i in snpfiles){
+  df = fread(i)
+  countSNPsp = rbind(countSNPsp, data.frame(count = colSums(!is.na(df[,c(5:18)]))) %>% rownames_to_column("species"))
+  countSNPchr = rbind(countSNPchr,df %>% group_by(CHROM) %>% dplyr::summarise(count = n_distinct(POS,REF,ALT)))
+}
+countSNPsp = 
+  countSNPsp %>% 
+  group_by(species) %>% 
+  dplyr::summarise(count = sum(count))
+countSNPsp$SVTYPE = "SNP"
+densitySNPchr =
+  merge(countSNPchr, bed, by.x = "CHROM", by.y = "Chr") %>% 
+  mutate(density = count*100000/End, SVTYPE = "SNP") 
+lenSNPsp = countSNPsp %>% 
+  dplyr::rename("total_length" = "count")
+
+
+# Inversions
+invs = read.delim("../INVERSIONS/inversions.syri.impg.mapc.filtered.clustered.0.9.txt")
+
+shared = invs[invs$is_singleton == "FALSE",] %>% 
+    dplyr::select("species","chr", "max_start" ,"min_end", "mean_length") %>% 
+    separate(species, into = c("species", "haplotype", "chr"), sep = "#") %>%
+    dplyr::select(1,3,4,5,6) %>% 
+    unique() %>% 
+    pivot_wider(names_from = species, values_from = mean_length) %>% 
+    replace(is.na(.),0) %>% mutate(across(c(4:17), ~ if_else(. > 0, 1,0))) %>%
+    mutate(N = rowSums(.[4:17])) 
+invs$shared_between_species = ""
+invs[paste0(invs$max_start, "-", invs$min_end) %in% paste0(shared[shared$N >1,]$max_start,"-",shared[shared$N >1,]$min_end),]$shared_between_species = "Yes"
+invs$shared_between_haps = ""
+invs[paste0(invs$max_start, "-", invs$min_end) %in% paste0(shared[shared$N ==1,]$max_start,"-",shared[shared$N ==1,]$min_end),]$shared_between_haps = "Yes"
+
+lensingletons = invs[invs$shared_between_species == "" & invs$shared_between_haps == "",] %>% group_by(species_list) %>% dplyr::summarise(sum(end -start)) %>% separate(species_list, into = c("species", "hap"), sep = "#") %>% group_by(species) %>% dplyr::summarise(total_length = sum(`sum(end - start)`))
+lengthsharedsp = invs[invs$shared_between_species == "Yes",] %>% separate(species_list, into = c("species", "hap"), sep = "#") %>% dplyr::select("species", "hap", "mean_length", "chr", "max_start", "min_end") %>% pivot_wider(names_from = hap, values_from = mean_length) %>% mutate(length = if_else(!is.na(`1`), `1`, `2`)) %>% group_by(species) %>% dplyr::summarise(total_length =sum(length))
+lengthsharedhaps = invs[invs$shared_between_haps == "Yes",] %>% separate(species_list, into = c("species", "hap"), sep = "#") %>% dplyr::select("species", "hap", "mean_length", "chr", "max_start", "min_end") %>% pivot_wider(names_from = hap, values_from = mean_length) %>% mutate(length = if_else(!is.na(`1`), `1`, `2`)) %>% group_by(species) %>% dplyr::summarise(total_length =sum(length))
+
+lenINVsp = rbind(lensingletons, lengthsharedsp, lengthsharedhaps)  %>% group_by(species) %>% dplyr::summarise(total_length = sum(total_length))
+lenINVsp$SVTYPE = "INV"
+
+countsingletons =invs[invs$shared_between_species == "" & invs$shared_between_haps == "",] %>% group_by(species_list) %>% dplyr::summarise(n_distinct(start,end)) %>% separate(species_list, into = c("species", "hap"), sep = "#") %>% group_by(species) %>% dplyr::summarise(count = sum(`n_distinct(start, end)`))
+countsharedsp = invs[invs$shared_between_species == "Yes",] %>% separate(species_list, into = c("species", "hap"), sep = "#") %>% dplyr::select("species", "hap", "mean_length", "chr", "max_start", "min_end") %>% pivot_wider(names_from = hap, values_from = mean_length) %>% group_by(species) %>% dplyr::summarise(count =n_distinct(chr,max_start,min_end)) 
+countsharedhaps = invs[invs$shared_between_haps == "Yes",] %>% separate(species_list, into = c("species", "hap"), sep = "#") %>% dplyr::select("species", "hap", "mean_length", "chr", "max_start", "min_end") %>% pivot_wider(names_from = hap, values_from = mean_length) %>% group_by(species) %>% dplyr::summarise(count =n_distinct(chr,max_start,min_end)) 
+
+countINVsp = rbind(countsingletons, countsharedsp, countsharedhaps) %>% group_by(species) %>% dplyr::summarise(count = sum(count))
+countINVsp$SVTYPE = "INV"
+
+countINVchr = invs %>% group_by(chr) %>% dplyr::summarise(count = n_distinct(start,end)) %>% dplyr::rename("CHROM"= "chr")
+densityINVchr =
+  merge(countINVchr, bed, by.x = "CHROM", by.y = "Chr") %>% 
+  mutate(density = count*100000/End, SVTYPE = "INV") 
+
+#Repeats
+repeats = read.delim("../Species_Specific_Masking/repeats.allhaplotypes.summary.tsv")
+densityTEchr = 
+  repeats %>% 
+  group_by(species, haplotype, chromosome) %>% 
+  dplyr::summarise(sum(repeat_covered_bases)) %>% 
+  mutate(haplotype = as.character(haplotype)) %>% 
+  left_join(beds) %>% 
+  mutate(density = `sum(repeat_covered_bases)`*100000/End) %>% 
+  mutate(CHROM = paste0("rPodCre2.1#1#", chromosome)) %>% 
+  ungroup() %>% 
+  dplyr::select(CHROM, Start, End, density) %>% 
+  mutate(count = NA) %>% mutate(SVTYPE = "TEs & Repeats") %>% filter(CHROM != "rPodCre2.1#1#W")
+
+
+varcount = rbind(countSNPsp, countMNPsp, countSVsp, countINVsp)
+varlen = rbind(lenSNPsp, lenMNPsp, lenSVsp, lenINVsp)
+varstatssp = merge(varcount, varlen, by = c("species", "SVTYPE"))
+varstatssp = merge(varstatssp, sample_data[,c(3,16,17)], by.x = "species", by.y = "MyName")
+varstatssp$clade = factor(varstatssp$clade, levels = rev(c("Siculus", "Muralis", "Iberian", "Western", "Sicilian-Maltese", "Balkan")))
+varstatssp$Organism.Name = factor(varstatssp$Organism.Name, levels = c("Podarcis gaigeae", "Podarcis melisellensis", "Podarcis erhardii", "Podarcis cretensis", "Podarcis filfolensis", "Podarcis raffonei", "Podarcis pityusensis", "Podarcis lilfordi", "Podarcis tiliguerta", "Podarcis bocagei", "Podarcis vaucheri","Podarcis liolepis", "Podarcis muralis nigriv.", "Podarcis muralis", "Podarcis siculus"))
+
+density = rbind(densitySNPchr, densityMNPchr, densitySVchr, densityINVchr)
+
+```
+
+## Number and total length of all variants
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+p1 = ggplot(varstatssp %>% reshape2::melt(id.vars = colnames(varstatssp)[c(-3,-4)]), aes(value,Organism.Name, fill = SVTYPE)) + geom_col() + labs(y = "", x = "Variants (M)", fill = "") + theme_bw() + theme(legend.position = "top", axis.text.y = element_text(face = "italic", size = 15), text = element_text(size = 15)) + scale_fill_manual(values = c("darkblue", "gold","steelblue1", "red3", "darkgreen")) + facet_grid(clade~variable, space = "free", scales = "free")
+
+p1
+
+pdf("../Figures/count_len_variants.pdf", width = 7, height = 9)
+p1
+dev.off()
+```
+
+
+
+## Density of variants per chr per species
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+p2 = density %>% ggplot(aes(density, factor(CHROM, levels = paste0("rPodCre2.1#1#",c(seq(0,18,1), "Z"))), colour = SVTYPE)) + geom_point(size = 3) + scale_colour_manual(values = c("darkblue", "gold","steelblue1","red3", "darkgreen")) + labs(x = "SV density (per 100kb)", y = "Chromosome") + theme_bw() + theme(text = element_text(size = 12), legend.position = "top") + facet_grid(~SVTYPE, scales = "free")
+
+p3 = densityTEchr %>% ggplot(aes(density, factor(CHROM, levels = paste0("rPodCre2.1#1#",c(seq(0,18,1), "Z"))), fill = SVTYPE)) + geom_boxplot() + scale_fill_manual(values =  "#52489C") + labs(x = "SV density (per 100kb)", y = "Chromosome") + theme_bw() + theme(text = element_text(size = 12), legend.position = "top") + facet_grid(~SVTYPE, scales = "free")
+
+p2 = p2 + p3 + plot_layout(axes = 'collect', guides = "collect", widths = c(5,1)) + theme(legend.position = "top")
+
+pdf("../Figures/density_variants.pdf", width = 15, height = 6)
+p2
+dev.off()
+
+```

@@ -166,7 +166,7 @@ ggplot(bind_rows(dsuite_raffonei_check_fdm[c(1:3)], .id = "Comparison") %>%
 dev.off()
 
 #Because the all_noncolinear and colinear dataframe is windows of 50kb while the inversions are less than that I will calculate the similarity of raffonei to other species within inversion separately (recompute for precision)
-files_dispnodes_within_inv=list.files("../INVERSIONS/", pattern = "paf.dispnodes.csv", recursive = T, full.names = T)
+files_dispnodes_within_inv=list.files("../INVERSIONS/", pattern = "paf.dispnodes.colinear.csv", recursive = T, full.names = T)
 final = NULL
 for (x in files_dispnodes_within_inv){
   df = read.delim(x, sep = ",")
@@ -203,17 +203,17 @@ library(circlize)
 library(grid)
 
 all_invs_raffonei = invs[invs$species_list == "rPodRaf1#1",]
-shared_raffonei = merge(shared[shared$rPodRaf1 == 1,-13] %>% 
-                          pivot_longer(cols = c(3:15)) %>% 
+shared_raffonei = merge(shared[shared$rPodRaf1 == 1,-14] %>% 
+                          pivot_longer(cols = c(4:16)) %>% 
                           filter(value > 0) %>% 
                           mutate(species_list = "rPodRaf1#1") %>% 
                           filter(name != "rPodRaf1"), 
                         sample_data[c(16,17)], by.x = "name", by.y = "MyName") %>% 
   dplyr::rename(presenceinotherclades = clade)
 all_invs_raffonei = merge(all_invs_raffonei, shared_raffonei, by = c("species_list", "max_start", "min_end"), all.x = TRUE) %>% unique()
-all_invs_raffonei = merge(all_invs_raffonei, final, by = c("species","subject_start","subject_end"), all = TRUE) %>% unique()
+all_invs_raffonei = merge(all_invs_raffonei, final, by.x = c("species","start_species_impg","end_species_impg"), by.y = c("species","subject_start","subject_end"), all = TRUE) %>% unique()
 
-all_invs_raffonei$inv_ids = paste0(all_invs_raffonei$species,"_", all_invs_raffonei$subject_start, "_", all_invs_raffonei$subject_end)
+all_invs_raffonei$inv_ids = paste0(all_invs_raffonei$species,"_", all_invs_raffonei$start_species_impg, "_", all_invs_raffonei$end_species_impg)
 all_invs_raffonei = all_invs_raffonei %>% mutate(presenceinotherclades = if_else(is.na(presenceinotherclades), "unique", presenceinotherclades))
 all_invs_raffonei = all_invs_raffonei[all_invs_raffonei$width > 1000,]
 
@@ -233,7 +233,7 @@ trees_df$snp_tree = TRUE
 trees_df = trees_df[,c("inv_ids","clade", "snp_tree", "bootstrap")]
 trees_df = trees_df[!is.na(trees_df$clade),]
 colnames(trees_df) = c("inv_ids","clade", "snp_tree", "bootstrap")
-inversion_order <- unique(all_invs_raffonei$inv_ids)
+inversion_order <- all_invs_raffonei[,25, drop = FALSE] %>% mutate(chr = sapply(str_split(sapply(str_split(inv_ids, "#"), .subset ,3), "_"),.subset,1))   %>% arrange(as.numeric(chr)) %>% unique() %>% pull(inv_ids)
 species_order <- c("Iberian", "Muralis", "Siculus", "Sicilian-Maltese", "Western", "Balkan")
 
 hits_long = merge(merge(presence_df, seq_df, by = c("inv_ids", "clade"), all = TRUE), trees_df, by = c("inv_ids", "clade"), all = TRUE)
@@ -361,13 +361,11 @@ bed_raf = bed_raf[bed_raf$Chr != "W",]
 mosaic = all_noncolinear_modified[all_noncolinear_modified$Focal_genome == "rPodRaf1",c("Focal_genome" ,"Focal_hap" ,"Focal_chr" ,"Chromosome_Window_Start", "Chromosome_Window_End", "Compared_clade")] %>% mutate("Chr" = Focal_chr, Value = case_when(Compared_clade == "Sicilian-Maltese" ~ 0, Compared_clade == "Muralis" ~ 50, Compared_clade == "Siculus" ~ 100, .default = 0)) %>% dplyr::select(Chr, Chromosome_Window_Start, Chromosome_Window_End, Value) 
 colnames(mosaic) = c("Chr", "Start", "End", "Value")
 mosaic$Chr <- unname(as.character(mosaic$Chr))
-ideogram(karyotype = bed_raf, overlaid = mosaic, output = "../Figures/Raffonei.mosaic.karyotype.svg", colorset1 = c("cyan4", "green", "yellow"))
+ideogram(karyotype = bed_raf, overlaid = mosaic, output = "../Figures/Raffonei.mosaic.karyotype.svg", colorset1 = c("grey", "darkgreen", "gold"))
 
 ## SVbyEye plots checking equivalent regions in parental genomes
 library(SVbyEye)
-inversions_to_check = c(unique(hits_long[which(hits_long$clade == "Muralis" & hits_long$value == "TRUE" & hits_long$category2 == "Unique to Raffonei"),]$inv_ids), unique(hits_long[which(hits_long$clade == "Siculus" & hits_long$value == "TRUE" & hits_long$category2 == "Unique to Raffonei" & hits_long$category == "dispsimilarity"),]$inv_ids))
-inversions_to_check = droplevels(inversions_to_check)
-inversions_to_check = data.frame(inversions_to_check) %>% separate(inversions_to_check, into = c("species","subject_start","subject_end"), sep = "_") %>% mutate(subject_start = as.integer(subject_start), subject_end = as.integer(subject_end)) %>% left_join(invs) 
+inversions_to_check = rbind(invs[invs$start_species_impg == "10990034",c(1:4)], invs[invs$start_species_impg == "32471599",c(1:4)]) 
 
 pafs = chr_map[chr_map$chromosome %in% sapply(str_split(inversions_to_check$chr, "#"), .subset, 3),]$community
 pafs = list.files(paste0("/home/zajac/SYRI/community", pafs, "/"), pattern = "paf", recursive = T, full.names = T)
@@ -380,6 +378,7 @@ for (i in pafs){
   )
   pafs_for_plotting[[name]] = paf.table
 }
+
 
 inversions_to_check_pafs = apply(inversions_to_check, 1, function(x){
   chr = str_remove(as.character(x[["chr"]]), "rPodCre2.1#1")
@@ -406,12 +405,10 @@ for (seq in 1:length(inversions_to_check_pafs)){
   miroplots[[seq]] = plots
 }
 
-pdf("Figures/Praffonei_INV_CHR13.pdf", height = 8, width = 5)
+pdf("Figures/Praffonei_INV_CHR13.pdf", height = 8, width = 7)
 miroplots[[1]]$`rPodRaf1#1#13`/miroplots[[1]]$`rPodMur119#2#13`/miroplots[[1]]$`rPodMur119#1#13`/miroplots[[1]]$`PodMur1#1#13` + plot_layout(guides = "collect")
 dev.off()
-pdf("Figures/Praffonei_INV_CHR13.2.pdf", height = 8, width = 5)
-miroplots[[2]]$`rPodRaf1#1#13`/miroplots[[2]]$`rPodMur119#2#13`/miroplots[[2]]$`rPodMur119#1#13`/miroplots[[2]]$`PodMur1#1#13` + plot_layout(guides = "collect")
+pdf("Figures/Praffonei_INV_CHR13.2.pdf", height = 8, width = 7)
+miroplots[[2]]$`rPodRaf1#1#13`/miroplots[[2]]$`rPodSic1#2#13`/miroplots[[2]]$`rPodSic1#1#13` + plot_layout(guides = "collect")
 dev.off()
-pdf("Figures/Praffonei_INV_CHR2.pdf", height = 6, width = 5)
-miroplots[[3]]$`rPodRaf1#1#2`/miroplots[[3]]$`rPodSic1#1#2`/miroplots[[3]]$`rPodSic1#2#2` + plot_layout(guides = "collect")
-dev.off()
+

@@ -29,7 +29,8 @@ library(ezRun)
 library(ggbeeswarm)
 library(data.table)
 library(parallel)
-library(vcfppR)
+library(ggrepel)
+#library(vcfppR)
 library(DT)
 library(data.table)
 
@@ -90,10 +91,9 @@ results <- mclapply(gr_all_similiarity, mc.cores = 15, function(x) {
 
 
 #Combine all alignments per genome per chromosome into one if split
-
 results = lapply(results, function(x) {x %>% 
   group_by(subject_seqname, subject_start, subject_end) %>% 
-  summarise(query_seqname = unique(query_seqname), 
+  dplyr::summarise(query_seqname = unique(query_seqname), 
             query_start = min(query_start), 
             query_end = max(query_end), 
             overlap_start = min(overlap_start), 
@@ -101,7 +101,6 @@ results = lapply(results, function(x) {x %>%
             overlap_length = sum(overlap_length))})
 
 #Add an ID to each BUSCO and add those not found in paf alignments
-
 results = lapply(results, function(x){
   x = merge(x, buscosdf, by.x = c("subject_seqname" ,"subject_start", "subject_end"), by.y = c("genome", "start", "end"), all = TRUE) %>% 
     unique() %>% 
@@ -124,7 +123,7 @@ all_results = bind_rows(results, .id = "Sparam")
 ## 1. Summary of selected BUSCOs
 
 ```{r, fig.height=7, fig.width=8, echo=FALSE, message=FALSE, warning=FALSE}
-x = buscosdf %>% separate(genome, into = c("species", "haplotype", "chromosome"), sep = "#") %>% group_by(chromosome) %>% summarise(value = n_distinct(Busco))  
+x = buscosdf %>% separate(genome, into = c("species", "haplotype", "chromosome"), sep = "#") %>% group_by(chromosome) %>% dplyr::summarise(value = n_distinct(Busco))  
 x$chromosome = factor(x$chromosome, levels = c(seq(1,18,1), "Z"))
 x %>% ggplot(aes(chromosome, value)) + geom_col(fill = "lightgrey", colour = "black") + theme_minimal_grid() + labs(y = "Number of single copy BUSCO genes")
 
@@ -139,7 +138,7 @@ dev.off()
 
 ```{r, fig.height=7, fig.width=8, echo=FALSE, message=FALSE, warning=FALSE}
 
-p1 = rbind(all_results[all_results$perc > 80 & all_results$Sparam != "s1000",] %>% group_by(genome, Busco, Sparam) %>% summarise(n()) %>% group_by(Busco, Sparam) %>% summarise(n_distinct(genome)) %>% filter(`n_distinct(genome)` > 20) %>% group_by(Sparam) %>% summarise(value = n_distinct(Busco)) %>% mutate(category = "min. 80% overlap with BUSCO for 80% of species"), all_results[all_results$perc == 0 & all_results$Sparam != "s1000",] %>% group_by(genome, Busco, Sparam) %>% summarise(n()) %>% group_by(Busco, Sparam) %>% summarise(n_distinct(genome)) %>% filter(`n_distinct(genome)` > 20) %>% group_by(Sparam) %>% summarise(value = n_distinct(Busco)) %>% mutate(category = "missing in min. 80% of species")) %>% ggplot(aes(category, value, fill = Sparam)) + geom_col(position = "dodge") + theme_bw() + scale_y_log10() + geom_text_repel(aes(label = value))
+p1 = rbind(all_results[all_results$perc > 80 & all_results$Sparam != "s1000",] %>% group_by(genome, Busco, Sparam) %>% dplyr::summarise(n()) %>% group_by(Busco, Sparam) %>% dplyr::summarise(n_distinct(genome)) %>% filter(`n_distinct(genome)` > 20) %>% group_by(Sparam) %>% dplyr::summarise(value = n_distinct(Busco)) %>% mutate(category = "min. 80% overlap with BUSCO for 80% of species"), all_results[all_results$perc == 0 & all_results$Sparam != "s1000",] %>% group_by(genome, Busco, Sparam) %>% dplyr::summarise(n()) %>% group_by(Busco, Sparam) %>% dplyr::summarise(n_distinct(genome)) %>% filter(`n_distinct(genome)` > 20) %>% group_by(Sparam) %>% dplyr::summarise(value = n_distinct(Busco)) %>% mutate(category = "missing in min. 80% of species")) %>% ggplot(aes(category, value, fill = Sparam)) + geom_col(position = "dodge") + theme_bw() + scale_y_log10() + geom_text_repel(aes(label = value))
 
 pdf("../Figures/BUSCO_results.paf.pdf", width = 10, height = 4)
 p1
@@ -179,9 +178,9 @@ all_results$perc_binned = ezCut(all_results$perc, breaks = c(0,20,80, 99,105, 12
 
 all_results %>% 
   group_by(Busco, perc_binned, Sparam) %>% 
-  summarise(nb_genomes = n_distinct(genome)) %>% 
+  dplyr::summarise(nb_genomes = n_distinct(genome)) %>% 
   group_by(perc_binned, nb_genomes, Sparam) %>% 
-  summarise(nb_buscos = n_distinct(Busco)) %>% 
+  dplyr::summarise(nb_buscos = n_distinct(Busco)) %>% 
   ggplot(aes(nb_buscos, factor(as.character(nb_genomes), levels = c(seq(1,26,1))), fill = Sparam)) + 
   geom_col(position = "dodge") + 
   facet_grid(~perc_binned, scales = "free") + 
@@ -191,15 +190,15 @@ all_results %>%
 ```{r, fig.height=11, fig.width=18}
 all_results$chromosome = factor(all_results$chromosome, levels = c(seq(1,18,1), "Z"))
 merge(all_results %>% group_by(Busco, perc_binned, chromosome, Sparam) %>% 
-        summarise(nb_genomes = n_distinct(genome)) %>% 
+        dplyr::summarise(nb_genomes = n_distinct(genome)) %>% 
         filter(perc_binned %in% c("(80 - 99]", "(99 - 105]", "(105 - 120]", "(120 - 180]", "(180 - 200]", "> 200")) %>% 
         group_by(chromosome, Busco, Sparam) %>% 
-        summarise(sum(nb_genomes)) %>% 
+        dplyr::summarise(sum(nb_genomes)) %>% 
         filter(`sum(nb_genomes)` == 26) %>% 
         group_by(chromosome, Sparam) %>% 
-        summarise(totally_covered = n_distinct(Busco)), 
+        dplyr::summarise(totally_covered = n_distinct(Busco)), 
       all_results %>% group_by(chromosome, Sparam) %>% 
-        summarise(total = n_distinct(Busco)), by = c("chromosome", "Sparam")) %>% 
+        dplyr::summarise(total = n_distinct(Busco)), by = c("chromosome", "Sparam")) %>% 
   mutate(totally_covered_busco_groups = (totally_covered*100)/total) %>% 
   ggplot(aes(chromosome, totally_covered_busco_groups,fill = Sparam)) + 
   geom_col(position = "dodge") + 
@@ -210,15 +209,15 @@ merge(all_results %>% group_by(Busco, perc_binned, chromosome, Sparam) %>%
 ```{r, fig.height=11, fig.width=18}
 
 merge(all_results %>% group_by(Busco, perc_binned, chromosome, Sparam) %>% 
-        summarise(nb_genomes = n_distinct(genome)) %>% 
+        dplyr::summarise(nb_genomes = n_distinct(genome)) %>% 
         filter(perc_binned %in% c("(80 - 99]", "(99 - 105]", "(105 - 120]", "(120 - 180]", "(180 - 200]", "> 200")) %>% 
         group_by(chromosome, Busco, Sparam) %>% 
-        summarise(sum(nb_genomes)) %>% 
+        dplyr::summarise(sum(nb_genomes)) %>% 
         filter(`sum(nb_genomes)` >= 25) %>% 
         group_by(chromosome, Sparam) %>% 
-        summarise(totally_covered = n_distinct(Busco)), 
+        dplyr::summarise(totally_covered = n_distinct(Busco)), 
       all_results %>% group_by(chromosome, Sparam) %>% 
-        summarise(total = n_distinct(Busco)), by = c("chromosome", "Sparam")) %>% 
+       dplyr::summarise(total = n_distinct(Busco)), by = c("chromosome", "Sparam")) %>% 
   mutate(totally_covered_busco_groups = (totally_covered*100)/total) %>% 
   ggplot(aes(chromosome, totally_covered_busco_groups,fill = Sparam)) + 
   geom_col(position = "dodge") + 
@@ -230,15 +229,15 @@ merge(all_results %>% group_by(Busco, perc_binned, chromosome, Sparam) %>%
 ```{r, fig.height=11, fig.width=18}
 
 merge(all_results %>% group_by(Busco, perc, chromosome, Sparam) %>% 
-    summarise(nb_genomes = n_distinct(genome)) %>% 
+    dplyr::summarise(nb_genomes = n_distinct(genome)) %>% 
     filter(perc >= 80) %>% 
     group_by(chromosome, Busco, Sparam) %>% 
-    summarise(sum(nb_genomes)) %>% mutate(expected_genomes = if_else(chromosome == "Z", 15, 26)) %>% mutate(perc_genomes = (`sum(nb_genomes)` * 100)/expected_genomes) %>% 
+    dplyr::summarise(sum(nb_genomes)) %>% mutate(expected_genomes = if_else(chromosome == "Z", 15, 26)) %>% mutate(perc_genomes = (`sum(nb_genomes)` * 100)/expected_genomes) %>% 
     filter(perc_genomes >= 80) %>% 
     group_by(chromosome, Sparam) %>% 
-    summarise(totally_covered = n_distinct(Busco)), 
+    dplyr::summarise(totally_covered = n_distinct(Busco)), 
     all_results %>% group_by(chromosome, Sparam) %>% 
-        summarise(total = n_distinct(Busco)), by = c("chromosome", "Sparam")) %>% 
+        dplyr::summarise(total = n_distinct(Busco)), by = c("chromosome", "Sparam")) %>% 
     mutate(totally_covered_busco_groups = (totally_covered*100)/total) %>% 
     ggplot(aes(totally_covered_busco_groups,chromosome,fill = Sparam)) + 
     geom_col(position = "dodge") + 
@@ -249,9 +248,9 @@ merge(all_results %>% group_by(Busco, perc, chromosome, Sparam) %>%
 
 ```{r, fig.height=11, fig.width=18}
 
-merge(all_results %>% filter(perc > 80) %>% group_by(genome, Sparam) %>% summarise(n_distinct(Busco)), 
+merge(all_results %>% filter(perc > 80) %>% group_by(genome, Sparam) %>% dplyr::summarise(n_distinct(Busco)), 
       all_results %>% group_by(genome, Sparam) %>% 
-          summarise(total = n_distinct(Busco)), by = c("genome", "Sparam"))%>% 
+          dplyr::summarise(total = n_distinct(Busco)), by = c("genome", "Sparam"))%>% 
     mutate(totally_covered_busco_groups = (`n_distinct(Busco)`*100)/total) %>% ggplot(aes( totally_covered_busco_groups,genome,fill = Sparam)) + 
     geom_col(position = "dodge") + 
     labs( y = "genome", x = "% Busco groups with each species covered in at least 80% in PAF") + 
@@ -306,7 +305,7 @@ all_pafs$chromosome = factor(all_pafs$chromosome, levels = c(seq(1,18,1), "Z"))
 ```{r, fig.height=7, fig.width=8}
 all_pafs[is.na(all_pafs$subject_seqname),] %>% 
   group_by(Busco,Sparam) %>% 
-  summarise(alignments_out_of_busco_bounds = n_distinct(paste0(query_seqname, query_start, query_end))) %>% 
+  dplyr::summarise(alignments_out_of_busco_bounds = n_distinct(paste0(query_seqname, query_start, query_end))) %>% 
   ggplot(aes(alignments_out_of_busco_bounds, fill = Sparam)) + geom_histogram(position = "dodge") + labs(y = "Number of BUSCO groups")
 ```
 
@@ -324,7 +323,7 @@ all_pafs[is.na(all_pafs$subject_seqname),] %>%
 
 all_pafs[is.na(all_pafs$subject_seqname),] %>% 
     group_by(Busco, chromosome,Sparam) %>% 
-    summarise(alignments_out_of_busco_bounds = n_distinct(paste0(query_seqname, query_start, query_end))) %>% 
+    dplyr::summarise(alignments_out_of_busco_bounds = n_distinct(paste0(query_seqname, query_start, query_end))) %>% 
     ggplot(aes(alignments_out_of_busco_bounds, fill = Sparam)) + geom_histogram(position = "dodge") + labs(y = "Number of BUSCO groups") + 
   facet_wrap(~chromosome)
 
@@ -334,8 +333,8 @@ all_pafs[is.na(all_pafs$subject_seqname),] %>%
 
 all_pafs[is.na(all_pafs$subject_seqname),] %>% 
     group_by(Busco, chromosome,Sparam) %>% 
-    summarise(alignments_out_of_busco_bounds = n_distinct(paste0(query_seqname, query_start, query_end))) %>% 
-  group_by(Sparam, chromosome) %>% summarise(sum(alignments_out_of_busco_bounds)) %>% 
+    dplyr::summarise(alignments_out_of_busco_bounds = n_distinct(paste0(query_seqname, query_start, query_end))) %>% 
+  group_by(Sparam, chromosome) %>% dplyr::summarise(sum(alignments_out_of_busco_bounds)) %>% 
   ggplot(aes(chromosome,`sum(alignments_out_of_busco_bounds)`, fill = Sparam)) + geom_col(position = "dodge")
 
 ```
@@ -357,7 +356,7 @@ all_pafs[is.na(all_pafs$subject_seqname),] %>%
 
 all_pafs[is.na(all_pafs$subject_seqname),] %>% 
     group_by(Busco, genome, Sparam) %>% 
-    summarise(alignments_out_of_busco_bounds = n_distinct(paste0(query_seqname, query_start, query_end))) %>% 
+    dplyr::summarise(alignments_out_of_busco_bounds = n_distinct(paste0(query_seqname, query_start, query_end))) %>% 
     ggplot(aes(alignments_out_of_busco_bounds, fill = Sparam)) + geom_histogram(position = "dodge") + labs(y = "Number of BUSCO groups") + 
   facet_wrap(~genome)
 
@@ -367,9 +366,9 @@ all_pafs[is.na(all_pafs$subject_seqname),] %>%
 
 all_pafs[is.na(all_pafs$subject_seqname),] %>% 
     group_by(Busco, genome,Sparam) %>% 
-    summarise(alignments_out_of_busco_bounds = n_distinct(paste0(query_seqname, query_start, query_end))) %>% 
+    dplyr::summarise(alignments_out_of_busco_bounds = n_distinct(paste0(query_seqname, query_start, query_end))) %>% 
   group_by(Sparam, genome) %>% 
-  summarise(sum(alignments_out_of_busco_bounds)) %>% 
+  dplyr::summarise(sum(alignments_out_of_busco_bounds)) %>% 
   ggplot(aes(genome,`sum(alignments_out_of_busco_bounds)`, fill = Sparam)) + geom_col(position = "dodge")
 
 ```
@@ -402,7 +401,7 @@ results = lapply(results, function(x){
   return(x)
   })
 
-results1 = lapply(results, function(x) {x %>% group_by(Busco,chromosome) %>% summarise(sequences = n_distinct(paste0(query_seqname, query_start, query_end)))})
+results1 = lapply(results, function(x) {x %>% group_by(Busco,chromosome) %>% dplyr::summarise(sequences = n_distinct(paste0(query_seqname, query_start, query_end)))})
 results1 = bind_rows(results1, .id = "Sparam")
 
 p1 = ggplot(results1, aes(sequences, color = Sparam)) + geom_density() + labs(color = "S-param", x = "Number of sequences per BUSCO", y = "density") + facet_wrap(~chromosome, ncol = 5, scales = "free")
@@ -523,7 +522,7 @@ for (i in  list.files("../pggb_allcommunities/community16.s1000/", pattern = "SV
   variants_per_sparam = rbind(tmp, variants_per_sparam)
 }
 
-variants_per_sparam %>% group_by(TYPE, genome, Sparam) %>% summarise(Vars = n_distinct(POS)) %>% ggplot(aes(genome, Vars, fill = Sparam)) + geom_col(position = "dodge") + facet_wrap(~TYPE, scales = "free") + theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1))
+variants_per_sparam %>% group_by(TYPE, genome, Sparam) %>% dplyr::summarise(Vars = n_distinct(POS)) %>% ggplot(aes(genome, Vars, fill = Sparam)) + geom_col(position = "dodge") + facet_wrap(~TYPE, scales = "free") + theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1))
 
 ```
 
@@ -549,7 +548,7 @@ for (i in  list.files("../pggb_allcommunities/community16.s1000/", pattern = "MN
   variants_per_sparam_MNP = rbind(tmp, variants_per_sparam_MNP)
 }
 
-variants_per_sparam_MNP %>% group_by(TYPE, genome, Sparam) %>% summarise(Vars = n_distinct(POS)) %>% ggplot(aes(genome, Vars, fill = Sparam)) + geom_col(position = "dodge") + facet_wrap(~TYPE, scales = "free") + theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1))
+variants_per_sparam_MNP %>% group_by(TYPE, genome, Sparam) %>% dplyr::summarise(Vars = n_distinct(POS)) %>% ggplot(aes(genome, Vars, fill = Sparam)) + geom_col(position = "dodge") + facet_wrap(~TYPE, scales = "free") + theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1))
 
 ```
 
@@ -574,7 +573,7 @@ for (i in  list.files("../pggb_allcommunities/community16.s1000/", pattern = "SN
   variants_per_sparam_SNP = rbind(tmp, variants_per_sparam_SNP)
 }
 
-variants_per_sparam_SNP %>% group_by(TYPE, genome, Sparam) %>% summarise(Vars = n_distinct(POS)) %>% ggplot(aes(genome, Vars, fill = Sparam)) + geom_col(position = "dodge") + facet_wrap(~TYPE, scales = "free") + theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1))
+variants_per_sparam_SNP %>% group_by(TYPE, genome, Sparam) %>% dplyr::summarise(Vars = n_distinct(POS)) %>% ggplot(aes(genome, Vars, fill = Sparam)) + geom_col(position = "dodge") + facet_wrap(~TYPE, scales = "free") + theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1))
 
 ```
 
@@ -619,12 +618,12 @@ jasmine_results2$POS = as.numeric(jasmine_results2$POS)
 #### Counts
 
 ```{r, fig.height=5, fig.width=6, echo=FALSE, message=FALSE, warning=FALSE}
-jasmine_results2 %>% group_by(jasmine_params, Sparam, genome, SVTYPE) %>% summarise(n_distinct(POS)) %>% filter(!is.na(SVTYPE))  %>% ggplot(aes(genome, `n_distinct(POS)`, fill = jasmine_params)) + geom_col(position = "dodge") + facet_wrap(SVTYPE~Sparam) + theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1)) + ggtitle("Supported by at least 2 methods") 
+jasmine_results2 %>% group_by(jasmine_params, Sparam, genome, SVTYPE) %>% dplyr::summarise(n_distinct(POS)) %>% filter(!is.na(SVTYPE))  %>% ggplot(aes(genome, `n_distinct(POS)`, fill = jasmine_params)) + geom_col(position = "dodge") + facet_wrap(SVTYPE~Sparam) + theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1)) + ggtitle("Supported by at least 2 methods") 
 
 ```
 
 ```{r, fig.height=5, fig.width=6, echo=FALSE, message=FALSE, warning=FALSE}
-jasmine_results2 %>% group_by(jasmine_params, Sparam, SUPP, SVTYPE) %>% summarise(n_distinct(POS)) %>% filter(!is.na(SVTYPE))  %>% ggplot(aes(SUPP, `n_distinct(POS)`, fill = jasmine_params)) + geom_col(position = "dodge") + facet_wrap(SVTYPE~Sparam) + theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1)) + ggtitle("Supported by at least 2 methods")
+jasmine_results2 %>% group_by(jasmine_params, Sparam, SUPP, SVTYPE) %>% dplyr::summarise(n_distinct(POS)) %>% filter(!is.na(SVTYPE))  %>% ggplot(aes(SUPP, `n_distinct(POS)`, fill = jasmine_params)) + geom_col(position = "dodge") + facet_wrap(SVTYPE~Sparam) + theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1)) + ggtitle("Supported by at least 2 methods")
 
 ```
 

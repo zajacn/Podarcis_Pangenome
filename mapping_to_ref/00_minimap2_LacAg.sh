@@ -16,4 +16,5 @@ k=$SLURM_ARRAY_TASK_ID
 ## Map LacAg to rPodCre2.1
 /data/biosoftware/minimap2/minimap2/minimap2 -ax asm10 -t 12 $DIR/chromosome_sets/community${k}_unmasked/rPodCre2.1#1*.fasta $DIR/chromosome_sets/community${k}_unmasked/LacAg#1*.fasta > $DIR/SYRI/community${k}/community${k}.rPodCre2.1_to_all/LacAg#1fasta.sam
 /data/biosoftware/samtools/samtools-1.20/samtools sort -m4G -@12 -o $DIR/SYRI/community${k}/community${k}.rPodCre2.1_to_all/LacAg#1fasta.sorted.bam $DIR/SYRI/community${k}/community${k}.rPodCre2.1_to_all/LacAg#1fasta.sam
-/data/biosoftware/samtools/samtools-1.20/samtools index $DIR/SYRI/community${k}/community${k}.rPodCre2.1_to_all/LacAg#1fasta.sorted.bam
+/data/biosoftware/samtools/samtools-1.20/samtools view -q 30 --threads 4 -b $DIR/SYRI/community${k}/community${k}.rPodCre2.1_to_all/LacAg#1fasta.sorted.bam > $DIR/SYRI/community${k}/community${k}.rPodCre2.1_to_all/LacAg#1fasta.filtered.sorted.bam
+/data/biosoftware/samtools/samtools-1.20/samtools index $DIR/SYRI/community${k}/community${k}.rPodCre2.1_to_all/LacAg#1fasta.filtered.sorted.bam

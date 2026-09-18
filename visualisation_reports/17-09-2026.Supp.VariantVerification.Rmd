@@ -1,0 +1,226 @@
+---
+title: "Variant verification summary"
+author: "Natalia Zajac"
+date: "11/11/2025"
+output:
+  html_document: 
+    highlight: pygments
+    theme: sand
+    code_folding: true
+    toc: true
+    toc_float: true
+---
+
+```{r setup, echo=FALSE, include=FALSE, warning=FALSE}
+library(vcfR)
+library(utils)
+library(dplyr)
+library(tidyverse)
+library(reshape2)
+library(cowplot)
+library(patchwork)
+library(ezRun)
+library(data.table)
+library(DT)
+library(ggVennDiagram)
+library(ComplexHeatmap)
+library(VennDiagram)
+
+#Sample data
+sample_data = read.delim("/groups/mpistaff/Zajac/genomes/sample_data.tsv")
+sample_data$clade=factor(sample_data$clade,levels=c("Balkan","Sicilian-Maltese","Western","Siculus","Muralis","Iberian"))
+
+minigraph = NULL
+for (i in seq(0,18,1)){
+  name = paste0("community",i)
+  ff = list.files(paste0("/home/zajac/minigraph/community", i), pattern = "graph.waved.norm.SV.vcf", full.names = T)
+  minigraph[[name]] = ff
+}
+minigraphsv = NULL
+for (i in names(minigraph)){
+  tmp = NULL
+  for (x in minigraph[[i]]){
+    vcf = read.vcfR(x)
+    vcf = data.frame(vcf@fix)[,c(2,4,5)]
+    tmp = rbind(vcf,tmp)
+  }
+  minigraphsv = rbind(minigraphsv, data.frame("community" = i, "svs" = nrow(unique(tmp))))
+}
+minigraphsv$method = "minigraph"
+
+pggb = NULL
+for (i in seq(0,18,1)){
+  name = paste0("community",i)
+  ff = list.files(paste0("/home/zajac/pggb_allcommunities/community", i, ".s5000"), pattern = ".norm.SV.vcf", full.names = T)
+  pggb[[name]] = ff
+}
+pggbsv = NULL
+for (i in names(pggb)){
+  tmp = NULL
+  for (x in pggb[[i]]){
+    vcf = read.vcfR(x)
+    vcf = data.frame(vcf@fix)[,c(2,4,5)]
+    tmp = rbind(vcf,tmp)
+  }
+  pggbsv = rbind(pggbsv, data.frame("community" = i, "svs" = nrow(unique(tmp))))
+}
+pggbsv$method = "iPGGB"
+
+svimasm = NULL
+for (i in seq(0,18,1)){
+  name = paste0("community",i)
+  ff = list.files(paste0("/home/zajac/SYRI//community", i, "/community", i, ".rPodCre2.1_to_all/"), pattern = "svimasm.norm.SV.vcf", full.names = T)
+  svimasm[[name]] = ff
+}
+svimasmsv = NULL
+for (i in names(svimasm)){
+  tmp = NULL
+  for (x in svimasm[[i]]){
+    vcf = read.vcfR(x)
+    vcf = data.frame(vcf@fix)[,c(2,4,5)]
+    tmp = rbind(vcf,tmp)
+  }
+  svimasmsv = rbind(svimasmsv, data.frame("community" = i, "svs" = nrow(unique(tmp))))
+}
+svimasmsv$method = "SVIM-asm"
+
+jasmin = list.files(paste0("/home/zajac/SV_intersects/largeSVs/"), pattern = "vcf", full.names = T)
+jasmin = jasmin[!grepl("annot", jasmin)]
+jasminsv = NULL
+for (x in jasmin){
+  i = str_remove(sapply(str_split(x, "DEFAULT."), .subset ,2), ".vcf")
+  vcf = read.vcfR(x)
+  vcf = data.frame(vcf@fix)[,c(2,4,5)]
+  jasminsv = rbind(jasminsv, data.frame("community" = paste0("community", i), "svs" = nrow(unique(vcf))))
+}
+jasminsv$method = "merged JASMIN"
+
+svs = rbind(minigraphsv, pggbsv, svimasmsv, jasminsv)
+snps = read.delim("/home/zajac/pggb_allcommunities/general_stats/pggb.bcftools.snps.summary.txt")
+
+#Load bed files
+beds = list.files("/groups/mpistaff/Zajac/genomes/ncbi_dataset/data/ALL_corrected_unmasked/", pattern = "fai", full.names = TRUE)
+beds = lapply(beds, function(x){ 
+  bed = read.delim(x, header = F)
+  bed$Start = 1
+  bed = bed[,c(1,6,2)]
+  colnames(bed) = c("Chr", "Start", "End")
+  bed  = bed %>% separate(Chr, into = c("species",  "haplotype", "chromosome"), sep = "#")
+  return(bed)
+})
+beds = bind_rows(beds)
+
+#Mapping minimap2
+ff = list.files("/home/zajac/SYRI/", pattern = "filtered.bam.depth", recursive = T, full.names = T)
+
+covsp = NULL
+for (i in ff[c(10:464)]){
+  species = sapply(str_split(sapply(str_split(sapply(str_split(i, "/"), .subset ,8), "\\."), .subset, 1), "#"), .subset, 1)
+  haplotype= sapply(str_split(sapply(str_split(sapply(str_split(i, "/"), .subset ,8), "\\."), .subset, 1), "#"), .subset, 2)
+  chromosome = sapply(str_split(sapply(str_split(sapply(str_split(i, "/"), .subset ,8), "\\."), .subset, 1), "#"), .subset, 3)
+  if (species == "rPodLil1"){
+    species = "rPodLil1.2"
+    haplotype = 1
+    chromosome = sapply(str_split(sapply(str_split(sapply(str_split(i, "/"), .subset ,8), "\\."), .subset ,2), '#'), .subset ,3)
+  } else {
+    species = species
+    haplotype = haplotype
+    chromosome = chromosome
+  }
+  end = beds[beds$species == species & beds$haplotype == haplotype & beds$chromosome == chromosome,]$End
+  df = fread(i)
+  df$bins = ezCut(df$V2, seq(1, as.numeric(end),100000))
+  df = df %>% group_by(bins) %>% dplyr::summarise(mean(V3))
+  df$species = species
+  df$haplotype = haplotype
+  df$chromosome = chromosome
+  covsp = rbind(df, covsp)
+}
+covsp = covsp %>% group_by(species , haplotype, chromosome) %>% 
+    mutate(id = dense_rank(bins)) 
+covsp = merge(covsp, sample_data[,c(3,16,17)], by.x = "species", by.y = "MyName") %>% unique() %>% arrange(bins) %>% arrange(chromosome) 
+
+```
+
+# Variants {.tabset}
+
+## SNPS
+
+```{r snps}
+A <- sum(snps$bcftools)/1000000
+B <- sum(snps$pggb)/1000000
+common <- sum(snps$count)/1000000
+
+venn.plot <- draw.pairwise.venn(
+  area1 = A,
+  area2 = B,
+  cross.area = common,
+  category = c("bcftools (Mio)", "IPGGB/vg (Mio)"),
+  fill = c("steelblue", "gold"),
+  alpha = c(0.5, 0.5),
+  lty = "blank",
+  cex = 2,
+  cat.cex = 1.5
+)
+
+venn.plot
+
+pdf("/home/zajac/Figures/SNPS.bothmethod.pdf", height = 6, width = 9)
+venn.plot
+dev.off()
+```
+
+## SVS
+
+```{r svs}
+
+
+p2 = svs %>% group_by(method) %>% dplyr::summarise(sum(svs)) %>% ggplot(aes(factor(method, levels = c("iPGGB", "minigraph", "SVIM-asm", "merged JASMIN")), `sum(svs)`/1000000)) + geom_col() + theme_bw() + labs(y = "INDELs >= 50bp (Mio)", x = "Method")
+
+p2 
+
+pdf("/home/zajac/Figures/SVs.threemethods.pdf", height = 4, width = 6)
+p2
+dev.off()
+```
+
+# Mapping stats {.tabset}
+
+## Average coverage along chr
+
+```{r svs}
+
+covsp3 = covsp %>% 
+         group_by(species,bins,chromosome,id,Organism.Name,clade) %>% 
+         dplyr::summarise(cov = mean("mean(V3)"))
+
+p3 = ggplot(covsp3[covsp3$clade %in% c("Balkan","Sicilian-Maltese","Western"),], 
+       aes(id, cov, colour = factor(Organism.Name, levels = c("Podarcis gaigeae", "Podarcis melisellensis", "Podarcis erhardii", "Podarcis cretensis", "Podarcis filfolensis", "Podarcis raffonei", "Podarcis pityusensis", "Podarcis lilfordi", "Podarcis tiliguerta", "Podarcis bocagei", "Podarcis vaucheri","Podarcis liolepis", "Podarcis muralis nigriv.", "Podarcis muralis", "Podarcis siculus")))) + 
+  geom_point() + 
+  ylim(0,3) + 
+  theme_bw() + 
+  facet_grid(factor(chromosome, levels = c(seq(1,18,1), "Z"))~clade) + 
+  scale_colour_manual(values = 
+                        c(rep("brown",3),rep("darkcyan",2), rep("blue3", 3)))+
+  theme(legend.position = "")
+
+p4 = ggplot(covsp3[covsp3$clade %in% c("Iberian","Muralis","Siculus"),], 
+       aes(id, cov, colour = factor(Organism.Name, levels = c("Podarcis gaigeae", "Podarcis melisellensis", "Podarcis erhardii", "Podarcis cretensis", "Podarcis filfolensis", "Podarcis raffonei", "Podarcis pityusensis", "Podarcis lilfordi", "Podarcis tiliguerta", "Podarcis bocagei", "Podarcis vaucheri","Podarcis liolepis", "Podarcis muralis nigriv.", "Podarcis muralis", "Podarcis siculus")))) + 
+  geom_point() + 
+  ylim(0,3) + 
+  theme_bw() + 
+  facet_grid(factor(chromosome, levels = c(seq(1,18,1), "Z"))~clade) + 
+  scale_colour_manual(values = 
+                        c(rep("magenta2",3),rep("green",2), "gold2"))+
+  theme(legend.position = "")
+  
+
+
+pdf("/home/zajac/Figures/Mapping_QC_part1.pdf", width = 20, height = 8)
+p3
+dev.off()
+
+pdf("/home/zajac/Figures/Mapping_QC_part2.pdf", width = 20, height = 8)
+p4
+dev.off()
+```

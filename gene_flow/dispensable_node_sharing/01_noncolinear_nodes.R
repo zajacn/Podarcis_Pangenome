@@ -2,6 +2,12 @@
 
 library(ggplot2)
 library(ggh4x)
+library(dplyr)
+library(tidyverse)
+library(readr)
+library(data.table)
+library(stringr)
+library(ezRun)
 
 
 chr_map = read.delim("../chromosome_sets/community.chr.map")
@@ -17,6 +23,10 @@ beds = lapply(beds, function(x){
   return(bed)
 })
 beds = bind_rows(beds)
+
+sample_data = read.delim("/groups/mpistaff/Zajac/genomes/sample_data.tsv")
+smp = c(setNames(sample_data$clade,paste0(sample_data$MyName, "#1")), setNames(sample_data$clade,paste0(sample_data$MyName, "#2")))
+sample_data$clade = factor(sample_data$clade, levels = c("Balkan", "Muralis", "Siculus", "Iberian", "Sicilian-Maltese", "Western"))
 
 #Now load in the disp node sharing across chromosomes
 all_noncolinear = NULL
@@ -58,6 +68,10 @@ for (i in seq(0,18,1)){
   print(df[df$Shared_pct > 5,] %>% group_by(Focal_genome, Focal_hap, Focal_chr, Chromosome_Window_Start) %>% dplyr::summarise(n_distinct(Compared_genome)) %>% filter(`n_distinct(Compared_genome)` > 1) %>% nrow())
   all_noncolinear = rbind(all_noncolinear,df)
 }
+all_noncolinear = all_noncolinear %>% 
+  mutate(window_description = case_when(Focal_genome == "rPodSic1" & Compared_clade %in% c("Muralis", "Iberian") ~ "phylogenetically_concordant", 
+                                        Focal_genome == "rPodSic1" & Compared_clade %in% c("Sicilian-Maltese", "Western", "Balkan") ~ "phylogenetically_discordant", 
+                                        .default = window_description))
 all_noncolinear$clade = factor(all_noncolinear$clade, levels = c("Iberian", "Muralis", "Siculus", "Sicilian-Maltese", "Western", "Balkan"))
 all_noncolinear$Compared_clade = factor(all_noncolinear$Compared_clade, levels = c("Iberian", "Muralis", "Siculus", "Sicilian-Maltese", "Western", "Balkan"))
 
@@ -104,6 +118,7 @@ p = all_noncolinear_modified %>%
   summarise(sum(Shared_bp)) %>% group_by(Focal_genome,clade) %>%  mutate(total = sum(`sum(Shared_bp)`)) %>% mutate(perc = `sum(Shared_bp)` *100/total) %>% filter(perc >= 1) %>% ggplot(aes(Focal_genome,Compared_genome, fill = perc)) + 
   geom_tile() + 
   scale_fill_viridis_c() + 
+  #scale_fill_gradient(low = "darkred", high = "white", na.value = "grey90")
   geom_text(aes(label = round(perc,0)), colour = "white", size = 9) + 
   facet_grid2(Compared_clade~clade, space = "free", scales = "free", strip = strip_themed(
     background_x = elem_list_rect(fill = c("magenta2", "green","yellow", "cyan4","blue","brown")),
@@ -123,6 +138,11 @@ pdf("../Figures/Matrix_shared_ancestry.pdf", width = 14, height = 10)
 p
 dev.off()
 
+## Check for distribution of phylogenetically discordant windows across chromosomes of all species
+
+x = all_noncolinear_modified %>% group_by(Focal_genome, Focal_hap, Focal_chr, block, window_description, clade) %>% summarise(tot = n_distinct(Chromosome_Window_Start)) %>% group_by(Focal_genome, Focal_hap, Focal_chr, block, clade) %>% mutate(sumt = sum(tot)) %>% ungroup() %>% filter(window_description == "phylogenetically_discordant") %>% mutate(res = tot*100/sumt) %>% mutate(clade = if_else(Focal_genome == "rPodTil1", "Tiliguerta", clade))
+x$clade = factor(x$clade, levels = c("Iberian", "Muralis", "Tiliguerta", "Western", "Siculus", "Sicilian-Maltese", "Balkan"))
+x %>% ggplot(aes(block, res, fill = clade)) + geom_violin() + theme_bw() + facet_grid(~clade) + scale_fill_manual(values = c("magenta2", "green","blue1", "blue","yellow", "cyan4","brown")) + labs(y = "Percentage of phylogenetically discordant windows")
 
 ## Check for distribution of phylogenetically discordant windows across chromosomes of the most admixed species
 p1 = all_noncolinear_modified %>% filter(Focal_genome %in% c("rPodRaf1", "rPodFil1", "rPodTil1", "rPodSic1")) %>% 
@@ -193,14 +213,14 @@ colnames(kary) = c("Chr", "Start", "End", "Value")
 
 ## And load inversion data and mark if shared between species
 invs = read.delim("../INVERSIONS/inversions.clustered.0.9proc.mapq.mapc.filtered.txt")
-shared = invs[invs$is_singleton == "FALSE",] %>% 
-  dplyr::select(3,15,16,17) %>% 
-  separate(species_list, into = c("species", "haplotype"), sep = "#") %>%
-  dplyr::select(1,3,4,5) %>% 
+shared = invs[invs$is_singleton == "FALSE",] %>% mutate(mean_length = min_end - max_start) %>% 
+  dplyr::select("species","chr","max_start","min_end", "mean_length") %>% 
+  separate(species, into = c("species", "haplotype", "chrom"), sep = "#") %>%
+  dplyr::select(1,4,5,6,7) %>% 
   unique() %>% 
   pivot_wider(names_from = species, values_from = mean_length) %>% 
-  replace(is.na(.),0) %>% mutate(across(c(3:16), ~ if_else(. > 0, 1,0))) %>%
-  mutate(N = rowSums(.[3:16])) 
+  replace(is.na(.),0) %>% mutate(across(c(4:16), ~ if_else(. > 0, 1,0))) %>%
+  mutate(N = rowSums(.[4:16])) 
 invs$shared_between_species = ""
 invs[paste0(invs$max_start, "-", invs$min_end) %in% paste0(shared[shared$N >1,]$max_start,"-",shared[shared$N >1,]$min_end),]$shared_between_species = "Yes"
   
@@ -240,15 +260,15 @@ for (i in unique(all_noncolinear_modified$Chr)) {
   windows = makeGRangesFromDataFrame(windows_df, keep.extra.columns = TRUE)
   
   inv_sub = invs[invs$species == i, ] %>%
-    dplyr::select(species, subject_start, subject_end, shared_between_species)
+    dplyr::select(species, start_species_impg, end_species_impg, shared_between_species)
   
   final = windows_df[0, ]  # empty template; filled in below if there are overlaps
   
   if (nrow(inv_sub) > 0) {
     inversions = makeGRangesFromDataFrame(inv_sub,
                                           seqnames.field = "species",
-                                          start.field    = "subject_start",
-                                          end.field      = "subject_end",
+                                          start.field    = "start_species_impg",
+                                          end.field      = "end_species_impg",
                                           keep.extra.columns = TRUE)
     
     hits = findOverlaps(windows, inversions)
@@ -342,16 +362,20 @@ phylogenetic_discordance_three_categories = dplyr::bind_rows(phylogenetic_discor
 
 # Manual correction: rPodSic1 vs Muralis comparisons are treated as concordant
 phylogenetic_discordance_three_categories = phylogenetic_discordance_three_categories %>%
-  mutate(desc = if_else(grepl("rPodSic1", Chr) & Compared_clade == "Muralis",
-                        "Phylogenetically concordant", desc))
+  mutate(desc = if_else(grepl("rPodSic1", Chr) & Compared_clade %in% c("Iberian", "Muralis"), "Phylogenetically concordant", desc))
 
 phylogenetic_discordance_three_categories = phylogenetic_discordance_three_categories %>%
-  mutate(species = sapply(str_split(Chr, "#"), .subset, 1)) %>%
+  mutate(species = sapply(str_split(Chr, "#"), .subset, 1)) 
+
+phylogenetic_discordance_three_categories = phylogenetic_discordance_three_categories %>%
   mutate(category2 = case_when(
     category2 == "within inversions" & shared_between_species == "Yes" ~ "within inversions shared between species",
     category2 == "within inversions" & shared_between_species == ""   ~ "within inversions unique to each species",
     TRUE ~ category2
   ))
+
+phylogenetic_discordance_three_categories = phylogenetic_discordance_three_categories %>% mutate(clade = if_else(species == "rPodTil1", "Tiliguerta", clade))
+phylogenetic_discordance_three_categories$clade = factor(phylogenetic_discordance_three_categories$clade, levels = c("Iberian", "Muralis", "Tiliguerta", "Western", "Siculus", "Sicilian-Maltese", "Balkan"))
 
 #Group into the desc categories and plot
 my_plot = phylogenetic_discordance_three_categories %>%
@@ -369,7 +393,7 @@ comparisons_list = combn(as.character(unique(my_plot_data$category2)), 2, simpli
 p = ggplot(my_plot_data, aes(category2, perc, fill = category2)) +
   geom_boxplot() + 
   facet_wrap2(~clade, strip = strip_themed(
-    background_x = elem_list_rect(fill = c("magenta2", "green","yellow", "cyan4","blue","brown")))) +
+    background_x = elem_list_rect(fill = c("magenta2", "green","blue","blue", "yellow", "cyan4", "brown")))) +
   stat_compare_means(comparisons = comparisons_list,
                      method = "wilcox.test",
                      label = "p.signif",

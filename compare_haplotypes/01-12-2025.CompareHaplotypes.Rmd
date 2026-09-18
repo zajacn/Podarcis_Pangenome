@@ -328,9 +328,9 @@ p1 +
 ```
 
 
-## Alternatively just normal plot no tree
+## Summary proteome without tree
 
-```{r, fig.height=15, fig.width=25, echo=FALSE, warning=FALSE, message=FALSE}
+```{r, fig.height=8, fig.width=11, echo=FALSE, warning=FALSE, message=FALSE}
 genes[genes$V1 == "rPodLil1.2#1",]$V2 = 21279
 data = merge(p1$data[p1$data$Hap == 1,c(4,10,11,12)] %>% filter(!is.na(label)), genes, by.x = "MyName", by.y = "V1")
 data = merge(data, genicH %>% mutate(species = paste0(species, "#1")) , by.x = "MyName", by.y = "species", all = TRUE)
@@ -338,13 +338,18 @@ data = merge(data, omark_results , by.x = "MyName", by.y = "Genome")
 
 data$Organism.Name = factor(data$Organism.Name, levels = rev(c("Podarcis cretensis","Podarcis erhardii", "Podarcis melisellensis", "Podarcis gaigeae", "Podarcis raffonei", "Podarcis filfolensis", "Podarcis tiliguerta","Podarcis lilfordi",  "Podarcis pityusensis","Podarcis liolepis","Podarcis vaucheri","Podarcis bocagei", "Podarcis muralis","Podarcis muralis nigriv.", "Podarcis siculus")))
 
+
+p = data %>% reshape2::melt(id.vars = c("MyName","label","Organism.Name","clade")) %>% replace(is.na(.),0) %>% ggplot(aes(as.numeric(value), Organism.Name)) + geom_point(size = 2) + facet_grid(~variable, scales = "free") + theme_bw() + theme(text = element_text(size = 15), legend.position = "top", legend.justification='left') + labs(x = "", y = "") + scale_y_discrete(labels = function(x) str_wrap(x, width = 10))
+
+p
+
 pdf("../Figures/Annotation_quality.pdf", width = 7, height = 6)
-data %>% reshape2::melt(id.vars = c("MyName","label","Organism.Name","clade")) %>% replace(is.na(.),0) %>% ggplot(aes(as.numeric(value), Organism.Name)) + geom_point(size = 2) + facet_grid(~variable, scales = "free") + theme_bw() + theme(text = element_text(size = 15), legend.position = "top", legend.justification='left') + labs(x = "", y = "") + scale_y_discrete(labels = function(x) str_wrap(x, width = 10))
+p
 dev.off()
 ```
 
 
-## Synteny
+## Synteny -2nd hap is scaffold vs chromosome-level
 
 
 ```{r, fig.height=5, fig.width=15, echo=FALSE, warning=FALSE, message=FALSE}
@@ -359,7 +364,6 @@ p1 + p2
 
 ## Quick overview of SYRI results between haplotypes of same species
 
-
 ```{r, fig.height=5, fig.width=15, echo=FALSE, warning=FALSE, message=FALSE}
 
 
@@ -368,3 +372,28 @@ SYRI_synteny[!(SYRI_synteny$X.Variation_type %in% c("Highly diverged", "Syntenic
 
 ```
 
+## Combined plots of between hap diversity
+
+```{r, fig.height=5, fig.width=15, echo=FALSE, warning=FALSE, message=FALSE}
+
+pA = SYRI_synteny[SYRI_synteny$X.Variation_type == "Syntenic regions",] %>% mutate(Length = as.numeric(Length)*100/V2) %>% mutate(MyName = paste0(sapply(str_split(value, "#"), .subset, 1), "#", sapply(str_split(value, "#"), .subset, 2))) %>% left_join(sample_data) %>% dplyr::select(11,6,3) %>% mutate(quality = if_else(quality == "closely related species", "bewteen closely related species", "within species between haplotypes")) %>% group_by(TreeTipName, quality) %>% dplyr::summarise(mean(Length)) %>% ggplot(aes(quality, `mean(Length)`)) + geom_boxplot() + theme_bw() + labs(x = "", y = "Average % of the genome in syntenic regions (pariwise alignment)")
+
+pB = SYRI_synteny[!(SYRI_synteny$X.Variation_type %in% c("Highly diverged", "Syntenic regions")) & SYRI_synteny$quality == "chromosome_level_assembly",]  %>% mutate(Length = as.numeric(Length)*100/V2) %>% mutate(MyName = paste0(sapply(str_split(value, "#"), .subset, 1), "#", sapply(str_split(value, "#"), .subset, 2))) %>% left_join(sample_data) %>% group_by(value,X.Variation_type, TreeTipName) %>% dplyr::summarise(sum(Length)) %>% group_by(TreeTipName, X.Variation_type) %>% dplyr::summarise(mean(`sum(Length)`)) %>% ggplot(aes(X.Variation_type , `mean(\`sum(Length)\`)`)) + geom_boxplot() + theme_bw() + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) + labs(x = "Variation type", y = "Average % of the genome (pairwise alignment)")
+
+pC = rbind(ani_diffsp, ani) %>% mutate(color = if_else(color == "Closely related species", "bewteen closely related species", "within species between haplotypes")) %>% ggplot(aes(color, value)) + geom_boxplot() + theme_bw() + labs(x = "", y = "Average Nucleotide Identity (PanKmer)")
+
+pD = ggplot(genicH, aes("All species",genic_hemizygosity)) + geom_boxplot() + theme_bw() + labs(x = "", y = "% of genes present on a single haplotype")
+
+pcomb = (pA + ggtitle("Synteny") + 
+    pC + ggtitle("ANI"))/
+(pB + ggtitle("Variants") +
+   pD  + ggtitle("Genic Hemizygosity") + 
+   plot_layout(widths = c(2, 1))) + 
+  theme(text = element_text(size = 20))
+
+pcomb
+
+pdf("../Figures/Haplotypes_Summary.pdf", height = 10, width = 15)
+pcomb
+dev.off()
+```

@@ -1,4 +1,14 @@
 #This script filters inversions for analysis
+library(GenomicRanges)
+library(utils)
+library(dplyr)
+library(tidyverse)
+library(reshape2)
+library(ezRun)
+library(data.table)
+library(DT)
+library(igraph)
+library(RIdeogram)
 
 ##Load bed files for all species
 beds = list.files("/groups/mpistaff/Zajac/genomes/ncbi_dataset/data/ALL_corrected_unmasked/", pattern = "fai", full.names = TRUE)
@@ -13,63 +23,15 @@ beds = lapply(beds, function(x){
 beds = bind_rows(beds)
 
 ##Load inversion data
-##Inversions here have been found using SYRI from pairwise mapping with minimap2 and impg query on paf files
-invs = NULL
-for (i in list.files("/home/zajac/SV_intersects/inversions/", pattern = "combined.txt", full.names = T)){
-  community=gsub("community(\\d+)\\.inversions.combined.txt", "\\1", basename(i))
-  df = read.delim(i, header = T, sep = " ") %>% mutate(community = community)
-  invs = rbind(invs, df)
-}
-invs= merge(invs, map, by = "community", all.x = TRUE)
-invs$Focal_chr = factor(invs$chromosome, levels = c(as.character(seq(1,18,1)), "Z"))
-invs = invs %>% mutate(MyName = sapply(str_split(query_genome, "#"), .subset, 1)) %>% left_join(sample_data[,c(16,17)])
-invs = invs %>% dplyr::rename("species" = "MyName" )
+all_invs = read.delim("/home/zajac/INVERSIONS/inversions.syri.impg.filtered.txt")
 
-all_invs_mod = all_invs %>% 
-  group_by(species, query_genome, query_start, query_end, subject_seqname, subject_X,genome, clade, Chr) %>% 
-  summarise(subject_X_start = min(subject_X_start), subject_X_end = max(subject_X_end)) %>% ungroup()
+##Load mapping QC
+mapc = read.delim("/home/zajac/INVERSIONS/temp/mapc.scan.of.syri.inversions.txt")
+all_invs = merge(all_invs, mapc, by = c("chr", "start", "end", "species"), all.x = TRUE)
 
-
-## Mapping quality to ensure that these are not just poorly mapping regions
-mapq_files = list.files("/home/zajac/SYRI/", pattern = "mapq", recursive = TRUE, full.names = TRUE)
-mapq_files = mapq_files[!grepl("LacAg", mapq_files)]
-
-mapq_all_invs = NULL
-for (x in mapq_files){
-  df = fread(x, header = F)
-  
-  species = str_remove(str_remove(sapply(str_split(x, "/"), .subset, 6), ".fasta.sorted.bam.mapq"), ".rev")
-  invs_to_check = all_invs_mod[all_invs_mod$query_genome == species,]
-  if (nrow(invs_to_check) != 0){
-    invs_qv = apply(invs_to_check, 1, function(x) df[df$V2 > x[["query_start"]] & df$V2 < x[["query_end"]],] %>% separate_rows(V3, sep = ","))
-    invs_qv = lapply(invs_qv, function(x){mean(as.numeric(x[["V3"]]))})
-    invs_to_check = cbind(invs_to_check, data.frame("mean_quality" = t(data.frame(invs_qv))))
-    mapq_all_invs = rbind(mapq_all_invs,invs_to_check)
-  }
-}
-
-
-##Mapping coverage to ensure there regions are not just sparsely covered
-mapc_files = list.files("/home/zajac/SYRI/", pattern = "depth$", recursive = TRUE, full.names = TRUE)
-mapc_files = mapc_files[!grepl("LacAg", mapc_files)]
-
-mapc_all_invs = NULL
-for (x in mapc_files[1:10]){
-  df = fread(x, header = F)
-  
-  species = str_remove(str_remove(sapply(str_split(x, "/"), .subset, 8), ".fasta.sorted.bam.depth"), ".rev")
-  invs_to_check = all_invs_mod[all_invs_mod$query_genome == species,]
-  if (nrow(invs_to_check) != 0){
-    invs_qv = apply(invs_to_check, 1, function(x) df[df$V2 > x[["query_start"]] & df$V2 < x[["query_end"]],] %>% separate_rows(V3, sep = ","))
-    invs_qv = lapply(invs_qv, function(x){mean(as.numeric(x[["V3"]]))})
-    invs_to_check = cbind(invs_to_check, data.frame("mean_coverage" = t(data.frame(invs_qv))))
-    mapc_all_invs = rbind(mapc_all_invs,invs_to_check)
-  }
-}
-
-##Filter out inversions with poor quality metrics
-all_invs_filtered = mapc_all_invs[which(mapc_all_invs$mean_quality >= 20 & mapc_all_invs$mean_coverage >= 0.4),]
-write_delim(all_invs_filtered, "/home/zajac/INVERSIONS/inversions.mapq.mapc.filtered.txt", delim = "\t", quote = "none")
+##Filter inversions by mapping cov 
+all_invs_filtered = all_invs %>% filter(mean_coverage > 0.25 & mean_coverage < 20)
+write_delim(all_invs_filtered, file = "INVERSIONS/inversions.syri.impg.mapc.filtered.txt")
 
 ##Cluster the inversions to find common inversions across species
 find_overlapping_inversions <- function(df_list, min_overlap) {
@@ -77,11 +39,11 @@ find_overlapping_inversions <- function(df_list, min_overlap) {
   # Convert to GRanges and extract data
   gr_list <- lapply(names(df_list), function(sp) {
     df <- df_list[[sp]]
-    GRanges(seqnames = df$subject_seqname, 
-            ranges = IRanges(start = df$query_start, end = df$query_end),
+    GRanges(seqnames = df$chr, 
+            ranges = IRanges(start = df$start, end = df$end),
             species = sp,                 
-            subject_start = df$subject_X_start,     
-            subject_end = df$subject_X_end)
+            subject_start = df$start_species_syri,     
+            subject_end = df$end_species_syri)
   })
   
   all_inversions <- do.call("c", gr_list)
@@ -192,11 +154,11 @@ singletons = NULL
 for (pid in c(0.5, 0.55, 0.60, 0.65, 0.7, 0.75, 0.8,0.85, 0.90, 0.95, 1)){ #Check for 50-100% overlap
   clustering = NULL
   detailed = NULL
-  for (chr in levels(all_invs_filtered$subject_seqname)){
+  for (chr in unique(all_invs_filtered$chr)){
     print(chr)
-    subset = all_invs_filtered[all_invs_filtered$subject_seqname == chr,]
-    df_list=split(subset, subset$query_genome)
-    df_list = lapply(df_list, function(x) unique(x[,c(1:5,10:11)]))
+    subset = all_invs_filtered[all_invs_filtered$chr == chr,]
+    df_list=split(subset, subset$species)
+    df_list = lapply(df_list, function(x) unique(x[,c(1:6)]))
     print(names(df_list))
     results <- find_overlapping_inversions(df_list, min_overlap=pid)
     stopifnot(
@@ -216,10 +178,10 @@ for (pid in c(0.5, 0.55, 0.60, 0.65, 0.7, 0.75, 0.8,0.85, 0.90, 0.95, 1)){ #Chec
 }
 
 ##Select 85%,90% and 95% sequence overlap to save. Primary choice 90%
-comb = bind_rows(all_detailed$min_overlap0.9, .id = "Chrom") 
+comb = merge(all_invs_filtered, bind_rows(all_detailed$min_overlap0.9, .id = "Chrom")[,c(3,4:6,8:13)], by.x = c("chr","start", "end", "species", "start_species_syri", "end_species_syri"), by.y = c("chr","start", "end", "species" ,"subject_start", "subject_end")) 
 comb$species_list = paste0(sapply(str_split(comb$species, "#"), .subset, 1), "#", sapply(str_split(comb$species, "#"), .subset, 2))
-comb = merge(comb, bind_rows(all_clustering$min_overlap0.9, .id = "Chrom"), by=c("clusters.membership", "Chrom", "species_list"), all.x = TRUE)
-write_delim(comb, "/home/zajac/INVERSIONS/inversions.clustered.0.9proc.mapq.mapc.filtered.txt", delim = "\t", quote = "none")
+comb = merge(comb, bind_rows(all_clustering$min_overlap0.9, .id = "chr"), by=c("clusters.membership", "chr", "species_list"), all.x = TRUE)
+write_delim(comb, "/home/zajac/INVERSIONS/inversions.syri.impg.mapc.filtered.clustered.0.9.txt", delim = "\t", quote = "none")
 
 ##Add info on core, private, dispensable node density within them
 list_of_chr = unique(comb$species)
@@ -227,7 +189,7 @@ list_of_files = list.files("/home/zajac/PhyloTree/GenomicMosaicism/", pattern = 
 
 divergence_in_inversions = NULL
 for (xm in list_of_chr[i]){
-  inversions = comb[comb$species == xm,c(10,11,12)]
+  inversions = comb[comb$species == xm,c(6:8)]
   file_of_nodes = list_of_files[grepl(paste0(xm,".paths"),list_of_files)]
   if (nrow(inversions) > 0){
     file_of_nodes = fread(file_of_nodes)
@@ -237,15 +199,15 @@ for (xm in list_of_chr[i]){
     x <- inversions[i, ]
     
     file_of_nodes[
-      file_of_nodes$start >= x$subject_start &
-        file_of_nodes$end <= x$subject_end,
+      file_of_nodes$start >= x$start_species_syri &
+        file_of_nodes$end <= x$end_species_syri,
     ] %>%
       group_by(cat) %>%
       summarise(length = sum(V2), .groups = "drop") %>%
       mutate(
         species = x$species,
-        subject_start = x$subject_start,
-        subject_end = x$subject_end
+        subject_start = x$start_species_syri,
+        subject_end = x$end_species_syri
       )
   })
   
@@ -256,16 +218,16 @@ for (xm in list_of_chr[i]){
 comb = merge(comb, 
              divergence_in_inversions %>% 
                unique() %>% 
-               group_by(species, subject_start, subject_end) %>% 
+               group_by(species, start_species_syri, end_species_syri) %>% 
                mutate(sum(length)) %>% 
                ungroup() %>% 
                mutate(perc = length*100/`sum(length)`) %>% 
                dplyr::select(-length) %>% 
                unique() %>% 
                pivot_wider(names_from = cat, values_from = perc), 
-             by = c("species" ,"subject_start", "subject_end"), all.x = TRUE) 
-comb[comb$species == "rPodTil1#2#8" & comb$subject_start == 78122500 & comb$subject_end == 78142455,]$private = 100
-write_delim(comb, "/home/zajac/INVERSIONS/inversions.clustered.0.9proc.mapq.mapc.filtered.node_annotation.txt", delim = "\t")
+             by = c("species" ,"start_species_syri", "end_species_syri"), all.x = TRUE) 
+#comb[comb$species == "rPodTil1#2#8" & comb$subject_start == 78122500 & comb$subject_end == 78142455,]$private = 100
+write_delim(comb, "/home/zajac/INVERSIONS/inversions.syri.impg.mapc.filtered.clustered.0.9.node_annotation.txt", delim = "\t")
 
 ##Plot
 library(RIdeogram)
@@ -276,9 +238,9 @@ colnames(bed) = c("Chr", "Start", "End")
 bed = bed %>% mutate(CH = str_remove(Chr, "rPodCre2.1#1#")) %>% arrange(as.numeric(CH)) %>% dplyr::select(1,2,3)
 
 gr_merged <- GRanges(
-  seqnames = all_invs_filtered$subject_seqname,
-  ranges   = IRanges(start = all_invs_filtered$query_start, 
-                     end = all_invs_filtered$query_end), 
+  seqnames = comb$chr,
+  ranges   = IRanges(start = comb$start, 
+                     end = comb$end), 
 )
 
 whole_chr <- GRanges(
@@ -297,16 +259,22 @@ final_table <- data.frame(
   value = mcols(final_gr)$value
 )
 final_table = final_table %>% 
-  left_join(comb[,c(4:6,13)]) %>% 
+  left_join(comb[,c(2,4,5,14)]) %>% 
   mutate(value = case_when(
     is.na(is_singleton) ~ 0, 
     is_singleton == "FALSE" ~ 100, 
     is_singleton == "TRUE" ~ 50)) %>% 
   dplyr::select(1,2,3,4,5) 
 colnames(final_table) = c("Chr", "Start", "End", "Value")
+final_table = unique(final_table)
 final_table <- final_table %>%
   ungroup() %>%
   as.data.frame(stringsAsFactors = FALSE)
 final_table$Chr = factor(final_table$Chr, levels = paste0("rPodCre2.1#1#", c(seq(1,18,1), "Z")))
 final_table$Chr <- unname(as.character(final_table$Chr))
 ideogram(karyotype = bed, overlaid = final_table, colorset1 = c("white","lightpink1", "plum4"), output = "Figures/Karyotype.invs.svg")
+
+##With centromeres
+centrs = read.delim("/groups/mpistaff/Zajac/analyses/Centromers/manually_curated_centromeres_quartet.txt")
+centrs = merge(centrs, data.frame(Species = unique(centrs$Species), color = c("7FB800", "E62B9B", "7F4031", "7F4031", "299578", "7F4031","1642E1", "E62B9B", "7F4031", "7FB800", "1642E1", "299578", "ECE74E", "1642E1","E62B9B"), Shape = rep("box", 15)), by = "Species") %>% dplyr::select(1,12,2,9,10,11) %>% unique() %>% dplyr::rename("Type" = "Species", "Start" = "centromere_start_inCretensis", "End" = "centromere_end_inCretensis")  %>% mutate(Chr = paste0("rPodCre2.1#1#", Chr)) %>% arrange(Chr) %>% filter(!is.na(Start))
+ideogram(karyotype = bed, overlaid = final_table, label = centrs, label_type = "marker", colorset1 = c("white","lightpink1", "plum4"), output = "Figures/Karyotype.invs2.svg")

@@ -16,11 +16,11 @@ k=$SLURM_ARRAY_TASK_ID
 ##  Call variants
 bcftools=/data/biosoftware/bcftools/bcftools-1.21/bcftools
 reference=$(ls /home/zajac/chromosome_sets/community${k}_unmasked/rPodCre2.1#1#*.fasta)
-FILES=$(ls /home/zajac/SYRI/community${k}/community${k}.rPodCre2.1_to_all/LacAg*.sorted.bam | sed 's"/home/zajac/SYRI/community'${k}'/community'${k}'.rPodCre2.1_to_all/""g' | sed 's/fasta.sorted.bam//g')
+FILES=$(ls /home/zajac/SYRI/community${k}/community${k}.rPodCre2.1_to_all/LacAg*.sorted.filtered.bam | sed 's"/home/zajac/SYRI/community'${k}'/community'${k}'.rPodCre2.1_to_all/""g' | sed 's/fasta.sorted.filtered.bam//g')
 
 for i in $FILES;
 do
-  $bcftools mpileup -Ou -f $reference /home/zajac/SYRI/community${k}/community${k}.rPodCre2.1_to_all/${i}fasta.sorted.bam > /home/zajac/SYRI/community${k}/community${k}.rPodCre2.1_to_all/${i}.pileup
+  $bcftools mpileup -Ou -f $reference /home/zajac/SYRI/community${k}/community${k}.rPodCre2.1_to_all/${i}fasta.sorted.filtered.bam > /home/zajac/SYRI/community${k}/community${k}.rPodCre2.1_to_all/${i}.pileup
   $bcftools call -mv -Oz -o /home/zajac/SYRI/community${k}/community${k}.rPodCre2.1_to_all/${i}.variants.bcftools.vcf.gz /home/zajac/SYRI/community${k}/community${k}.rPodCre2.1_to_all/${i}.pileup
   $bcftools index /home/zajac/SYRI/community${k}/community${k}.rPodCre2.1_to_all/${i}.variants.bcftools.vcf.gz
   $bcftools view -v snps -Oz -o /home/zajac/SYRI/community${k}/community${k}.rPodCre2.1_to_all/community${k}.${i}.snps_only.vcf.gz /home/zajac/SYRI/community${k}/community${k}.rPodCre2.1_to_all/${i}.variants.bcftools.vcf.gz
