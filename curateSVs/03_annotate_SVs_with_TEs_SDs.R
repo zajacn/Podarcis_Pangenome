@@ -93,7 +93,7 @@ deletions = merge(data.frame(deletion)[,c(1:4)],
   slice_max(overlap_length)
 deletions = deletions %>% mutate(Category = 
                                  case_when(repeats %in% c("LTR","DNA","SINE","LINE", "PLE") ~ "Transposable Elements", 
-                                           repeats %in% c("Satellite","Simple_repeat","Low_complexity","snRNA","tRNA","rRNA") ~ "Repeats", 
+                                           repeats %in% c("Satellite","Simple_repeat","Low_complexity","snRNA","tRNA","rRNA", "Unknown") ~ "Repeats", 
                                            is.na(repeats) ~ "Not TE or Repeat")) 
 write_delim(deletions, "../Species_Specific_Masking/transposable_elements_fasta/temp.DEL.filt.txt", delim  = "\t")
 # Annotation of INSERTIONs for TEs and Repeats - performed with blast
