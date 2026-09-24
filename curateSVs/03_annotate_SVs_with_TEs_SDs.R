@@ -54,7 +54,6 @@ all_comb$LEN = abs(all_comb$ALTLEN - all_comb$REFLEN)
 # Annotation of DELETIONs for TEs and Repeats 
 
 cretensis_repeats = makeGRangesFromDataFrame(repeats[repeats$species == "rPodCre2.1",c(1,3,4,5,6,7)] %>% 
-                                               filter(repeat_class != "Unknown"),
                                              seqnames.field = "chromosome", 
                                              start.field = "positioninquery_begin", 
                                              end.field = "positioninquery_end", 
