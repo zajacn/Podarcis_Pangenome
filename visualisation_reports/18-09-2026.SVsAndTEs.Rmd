@@ -1,0 +1,388 @@
+---
+title: "SVs in TEs"
+author: "Natalia Zajac"
+date: "05/11/2025"
+output:
+  html_document: 
+    highlight: pygments
+    theme: sand
+    code_folding: true
+    toc: true
+    toc_float: true
+---
+
+# This notebook aims to evaluate and analyse SV data
+
+```{r setup, echo=FALSE, include=FALSE, warning=FALSE}
+library(vcfR)
+library(utils)
+library(dplyr)
+library(tidyverse)
+library(reshape2)
+library(cowplot)
+library(patchwork)
+library(ezRun)
+library(ggbeeswarm)
+library(data.table)
+library(DT)
+
+# Metadata
+sample_data = read.delim("/groups/mpistaff/Zajac/genomes/sample_data.tsv")
+sample_data$clade=factor(sample_data$clade,levels=c("Balkan","Sicilian-Maltese","Western","Siculus","Muralis","Iberian"))
+
+
+# Bed coordinates
+bed = read.delim("/groups/mpistaff/Zajac/genomes/ncbi_dataset/data/ALL_corrected_unmasked/rPodCre2.1#1.all.fasta.fai", header = F)
+bed$Start = 1
+bed = bed[,c(1,6,2)]
+colnames(bed) = c("Chr", "Start", "End")
+
+# Repeats and TEs - classification
+repeats = fread("../Species_Specific_Masking/repeats.allhaplotypes.tsv", sep = "\t")
+summary_repeats =  fread("../Species_Specific_Masking/repeats.allhaplotypes.summary.tsv", sep = "\t")
+
+
+# SVs (INDELs)
+all_comb = NULL
+for (i in list.files("../SV_intersects/largeSVs/", pattern = "merged.DEFAULT")[!grepl("annot",list.files("../SV_intersects/largeSVs/", pattern = "merged.DEFAULT"))]){
+    comb = read.vcfR(paste0("../SV_intersects/largeSVs/", i))
+    comb = cbind(data.frame(comb@fix), data.frame(comb@gt))
+    comb = comb %>% 
+      mutate(countALT = nchar(ALT), countN = str_count(ALT, "N")) %>% 
+      mutate(perc = countN/countALT) %>% filter(perc < 0.5) 
+    comb = comb %>% dplyr::mutate(across(10:23, ~ str_remove(., ":.*"))) %>% 
+        mutate(REFLEN = nchar(REF), ALTLEN = nchar(ALT)) %>% 
+        mutate(SVTYPE = sub(".*SVTYPE=([^;]+).*", "\\1", INFO),
+               TYPE=sub(".*;TYPE=([^;]+).*", "\\1", INFO),
+               AVG_LEN = sub(".*AVG_LEN=([^;]+).*", "\\1", INFO), 
+               AVG_START = sub(".*AVG_START=([^;]+).*", "\\1", INFO), 
+               AVG_END = sub(".*AVG_END=([^;]+).*", "\\1", INFO)) %>% 
+        mutate(SVTYPE = case_when(SVTYPE == "INS" ~ "INS", 
+               SVTYPE == "DEL" ~ "DEL", 
+               (!SVTYPE %in% c("INS", "DEL")) &  !is.na(TYPE) ~ TYPE, 
+               (!SVTYPE %in% c("INS", "DEL")) &  is.na(TYPE) ~ "NA"))
+    comb = comb[,c(1,2,3,10:23,27:33)]
+    comb = comb %>% dplyr::mutate(across(colnames(comb)[4:17], ~ case_when(. == "0|0" ~ 0, . == "0" ~ 0, . == "1|1" ~ 1, . == "1" ~ 1,  . == "0|1" ~ 1, . == "1|0" ~ 1, . == ".|1" ~ 1, . == "0|."~ 0, . == ".|0" ~ 0, . == "1|." ~ 1 )))
+    all_comb[[i]] = comb
+}
+all_comb = bind_rows(all_comb)
+all_comb$LEN = abs(all_comb$ALTLEN - all_comb$REFLEN)
+
+# Load annotation nnotation of DELETIONs and INSERTIONS with TEs and Repeats 
+insertions = fread("../Species_Specific_Masking/transposable_elements_fasta/temp.INS.filt.txt")
+deletions = fread("../Species_Specific_Masking/transposable_elements_fasta/temp.DELS.filt.txt")
+
+
+#Dispensable nodes
+dispfiles = list.files("../pggb_allcommunities/", pattern = "nodes.fasta.len", full.names = T, recursive = T)
+disppg = NULL
+for (i in dispfiles){
+  df = fread(i)
+  df$blocks = ezCut(df$V2,seq(1,100,49))
+  disppg = rbind(disppg, df %>% group_by(blocks) %>% summarise(sum(V2), count = n()))
+}
+
+
+   
+TES_pallete = list("LTR" = "#3B8ABEFF", 
+                   "DNA" = "#A6CEE3FF", 
+                   "SINE" = "#8C66AFFF", 
+                   "LINE" = "#72B29CFF", 
+                   "PLE" =  "#84C868FF",
+                   "RC" = "#4F9F3BFF",
+                   "Unknown" = "#B15928FF", 
+                   "Satellite" = "#EC9A91FF", 
+                   "Simple_repeat" = "#F06C45FF", 
+                   "Low_complexity" = "#FDAC4FFF", 
+                   "snRNA" = "#FB820FFF", 
+                   "tRNA" = "#A99099FF", 
+                   "rRNA" = "#EEDB80FF", 
+                   "Retroposon" = "#E93E3FFF")   
+
+
+
+```
+
+# Summary of the overlap between Tes and SVs {.tabset}
+
+## TEs densities across lengths
+
+```{r}
+
+p0= ggplot() + geom_histogram(data = insertions, aes(x = LEN, y = ..density.., fill = repeat_class), bins = 100) + xlim(0,1500)  + geom_histogram(data = deletions, aes(x = width, y =-..density.., fill=repeats), bins = 100) + scale_fill_manual(
+    values = TES_pallete,
+    na.value = "black"
+) + theme_bw()+ theme(text = element_text(size = 15)) + labs(y = "Density", x = "Length (bp)", fill = "TE/Repeats" ) + scale_x_log10() + facet_grid(~Category)
+
+p0
+
+pdf("../Figures/TEs_length_density.pdf", width = 12, height = 4)
+p0
+dev.off()
+
+```
+
+
+## TE, Repeats and NonTE abundances vs length
+
+
+```{r}
+
+p1 = ggplot() +
+    geom_histogram(
+        data = insertions,
+        aes(x = LEN, y = after_stat(count), fill = repeat_class),
+        bins = 100
+    ) +
+    geom_histogram(
+        data = deletions,
+        aes(x = width, y = -after_stat(count), fill = repeats),
+        bins = 100
+    ) + scale_fill_manual(
+    values = TES_pallete,
+    na.value = "black"
+    ) +
+    scale_x_log10(
+    ) +
+    theme_bw() +
+    theme(
+        text = element_text(size = 15)
+    ) +
+    labs(
+        y = "Abundance",
+        x = "Length (bp)",
+        fill = "TE/Repeats"
+    ) +
+    facet_grid(~Category)
+
+p1
+
+pdf("../Figures/TEs_length_abundance.pdf", width = 12, height = 4)
+p1
+dev.off()
+```
+
+
+```{r}
+
+p1 = ggplot() +
+    geom_histogram(
+        data = insertions,
+        aes(x = LEN, y = after_stat(count), fill = repeat_class),
+        bins = 100
+    ) +
+    geom_histogram(
+        data = deletions,
+        aes(x = width, y = -after_stat(count), fill = repeats),
+        bins = 100
+    ) + scale_fill_manual(
+    values = TES_pallete,
+    na.value = "black"
+    ) +
+    scale_x_log10(
+    ) +
+    theme_bw() +
+    theme(
+        text = element_text(size = 15)
+    ) +
+    labs(
+        y = "Abundance",
+        x = "Length (bp)",
+        fill = "TE/Repeats"
+    ) +
+    facet_grid(~Category)
+
+p1
+
+pdf("../Figures/TEs_length_abundance_repandTe.pdf", width = 12, height = 4)
+p1
+dev.off()
+```
+
+## TE and NonTE proportions at each length block
+
+
+```{r}
+
+
+insertions$LEN_blocks <- ezCut(
+  insertions$LEN,
+  seq(0, 5000, 100)
+)
+
+deletions$width_blocks <- ezCut(
+  deletions$width,
+  seq(0, 5000, 100)
+)
+
+
+# Insertions
+
+p2 <- insertions %>%
+  group_by(
+    species,
+    repeat_class,
+    Category,
+    LEN_blocks
+  ) %>%
+  summarise(
+    count = n_distinct(CHROM, POS, LEN),
+    .groups = "drop"
+  ) %>%
+  ggplot(
+    aes(
+      x = LEN_blocks,
+      y = count,
+      fill = repeat_class
+    )
+  ) +
+  geom_col(
+    position = "fill",
+    width = 1
+  ) +
+  scale_fill_manual(
+    values = TES_pallete,
+    na.value = "black"
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  labs(
+    x = NULL,
+    y = "Fraction",
+    fill = "TE / repeat"
+  ) +
+  theme_classic(base_size = 10) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+
+    axis.title.y = element_text(size = 9),
+    axis.text.y = element_text(size = 8),
+
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 8),
+
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.4, "cm"),
+
+    panel.spacing = unit(0.2, "lines"),
+
+    plot.margin = margin(2, 3, 0, 3)
+  )
+
+
+#Deletions 
+
+p3 <- deletions %>%
+  group_by(
+    repeats,
+    Category,
+    width_blocks
+  ) %>%
+  summarise(
+    count = n_distinct(seqnames, start, end, width),
+    .groups = "drop"
+  ) %>%
+  ggplot(
+    aes(
+      x = width_blocks,
+      y = count,
+      fill = repeats
+    )
+  ) +
+  geom_col(
+    position = "fill",
+    width = 1
+  ) +
+  scale_fill_manual(
+    values = TES_pallete,
+    na.value = "black"
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  labs(
+    x = "Length (bp)",
+    y = "Fraction",
+    fill = "TE / repeat"
+  ) +
+  theme_classic(base_size = 10) +
+  theme(
+    axis.title.x = element_text(size = 9),
+    axis.text.x = element_text(
+      size = 7,
+      angle = 45,
+      hjust=1,
+      vjust = 1
+    ),
+    axis.ticks.x = element_line(linewidth = 0.25),
+
+    axis.title.y = element_text(size = 9),
+    axis.text.y = element_text(size = 8),
+
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 8),
+
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.4, "cm"),
+
+    panel.spacing = unit(0.2, "lines"),
+
+    plot.margin = margin(0, 3, 2, 3)
+  )
+
+
+# Combine 
+
+final_length_plot <- p2 / p3 +
+  plot_layout(
+    guides = "collect",
+    heights = c(1, 1)
+  ) &
+  theme(
+    legend.position = "right"
+  )
+
+
+final_length_plot
+
+pdf("../Figures/TEs_length_proportions.pdf", width = 8, height = 4)
+final_length_plot
+dev.off()
+```
+
+## TEs and Repeats in INDELs across species - Supplementary
+
+
+```{r}
+pdf("../Figures/TEs_length_proportions_per_species.pdf", height = 10, width = 15)
+insertions %>% group_by(species, repeat_class, Category,LEN_blocks ) %>% summarise(count = n_distinct(CHROM,POS, LEN)) %>% ggplot(aes(LEN_blocks, count, fill = repeat_class)) + geom_col(position = "fill") + scale_fill_manual(values = TES_pallete, na.value = "black") + labs(y = "Fraction", x = "blocks", fill = "repeats") + theme_bw() +  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) + facet_wrap(~species)
+dev.off()
+
+pdf("../Figures/TEs_length_abundance_per_species.pdf", height = 11, width = 10)
+ggplot() +
+    geom_histogram(
+        data = insertions,
+        aes(x = LEN, y = after_stat(count), fill = repeat_class),
+        bins = 100
+    ) + scale_fill_manual(
+        values = TES_pallete,
+        na.value = "black"
+    ) +
+    scale_x_log10(
+    ) +
+    theme_bw() +
+    theme(
+        text = element_text(size = 15)
+    ) +
+    labs(
+        y = "Abundance",
+        x = "Length (bp)",
+        fill = "TE/Repeats"
+    ) +
+    facet_grid(species~Category, scales = "free")
+dev.off()
+```

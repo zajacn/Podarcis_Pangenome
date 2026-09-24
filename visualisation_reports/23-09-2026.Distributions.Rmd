@@ -1,0 +1,584 @@
+---
+title: "SVs in TEs"
+author: "Natalia Zajac"
+date: "05/11/2025"
+output:
+  html_document: 
+    highlight: pygments
+    theme: sand
+    code_folding: true
+    toc: true
+    toc_float: true
+---
+
+# This notebook aims to evaluate and analyse SV data
+
+```{r setup, echo=FALSE, include=FALSE, warning=FALSE}
+library(vcfR)
+library(utils)
+library(dplyr)
+library(tidyverse)
+library(reshape2)
+library(cowplot)
+library(patchwork)
+library(ezRun)
+library(ggbeeswarm)
+library(data.table)
+library(DT)
+library(parallel)
+
+# Metadata
+sample_data = read.delim("/groups/mpistaff/Zajac/genomes/sample_data.tsv")
+sample_data$clade=factor(sample_data$clade,levels=c("Balkan","Sicilian-Maltese","Western","Siculus","Muralis","Iberian"))
+
+
+# Bed coordinates for cretensis
+bed = read.delim("/groups/mpistaff/Zajac/genomes/ncbi_dataset/data/ALL_corrected_unmasked/rPodCre2.1#1.all.fasta.fai", header = F)
+bed$Start = 1
+bed = bed[,c(1,6,2)]
+colnames(bed) = c("Chr", "Start", "End")
+
+#Load bed files for all species
+beds = list.files("/groups/mpistaff/Zajac/genomes/ncbi_dataset/data/ALL_corrected_unmasked/", pattern = "fai", full.names = TRUE)
+beds = lapply(beds, function(x){ 
+  bed = read.delim(x, header = F)
+  bed$Start = 1
+  bed = bed[,c(1,6,2)]
+  colnames(bed) = c("Chr", "Start", "End")
+  bed  = bed %>% separate(Chr, into = c("Focal_genome",  "Focal_hap", "Focal_chr"), sep = "#")
+  return(bed)
+})
+beds = bind_rows(beds)
+
+# Repeats and TEs - classification
+summary_repeats =  fread("../Species_Specific_Masking/repeats.allhaplotypes.summary.tsv", sep = "\t")
+summary_repeats = summary_repeats[,c(1:9)]
+colnames(summary_repeats) = c("Focal_genome", "Focal_hap", "Focal_chr", colnames(summary_repeats)[-c(1:3)])
+summary_repeats$Focal_hap = as.character(summary_repeats$Focal_hap)
+summary_repeats = summary_repeats %>% 
+  left_join(beds, by = c("Focal_genome", "Focal_hap", "Focal_chr")) %>% 
+  mutate(blocks = round(End/16,0))
+summary_repeats = summary_repeats %>%
+  group_by(Focal_genome, Focal_hap, Focal_chr) %>%
+  group_modify(~ {
+    breaks <- seq(unique(.x$blocks), unique(.x$End) - unique(.x$blocks), length.out = 15)
+    .x %>%
+      mutate(block = ezCut(end, 
+                           breaks, labels = as.character(seq(1,16,1))))
+  }) %>%
+  ungroup()
+summary_repeats = summary_repeats %>% 
+  group_by(Focal_genome, Focal_hap, Focal_chr, block, blocks) %>% 
+  summarise(repeat_covered_bases = sum(repeat_covered_bases)) %>% 
+  mutate(repeat_covered_bases = repeat_covered_bases*100/as.numeric(blocks))
+summary_repeats = summary_repeats[summary_repeats$Focal_chr != "W",]
+summary_repeats$chr_category = case_when(summary_repeats$Focal_chr  %in% c("Z") ~ "Z", summary_repeats$Focal_chr %in% c("18") ~ "18", .default = "17 Autosomes")
+
+repeats =  fread("../Species_Specific_Masking/repeats.allhaplotypes.tsv", sep = "\t")
+repeats$seqid = paste0(repeats$species, "#", repeats$haplotype, "#", repeats$chromosome)
+repeats_gr <- makeGRangesFromDataFrame(repeats[,c(4,5,6,13)], 
+                                       seqnames.field = "seqid", 
+                                       start.field = "positioninquery_begin", 
+                                       end.field = "positioninquery_end", 
+                                       keep.extra.columns = T)
+
+# SVs (INDELs)
+all_comb = NULL
+for (i in list.files("../SV_intersects/largeSVs/", pattern = "merged.DEFAULT")[!grepl("annot",list.files("../SV_intersects/largeSVs/", pattern = "merged.DEFAULT"))]){
+    comb = read.vcfR(paste0("../SV_intersects/largeSVs/", i))
+    comb = cbind(data.frame(comb@fix), data.frame(comb@gt))
+    comb = comb %>% 
+      mutate(countALT = nchar(ALT), countN = str_count(ALT, "N")) %>% 
+      mutate(perc = countN/countALT) %>% filter(perc < 0.5) 
+    comb = comb %>% dplyr::mutate(across(10:23, ~ str_remove(., ":.*"))) %>% 
+        mutate(REFLEN = nchar(REF), ALTLEN = nchar(ALT)) %>% 
+        mutate(SVTYPE = sub(".*SVTYPE=([^;]+).*", "\\1", INFO),
+               TYPE=sub(".*;TYPE=([^;]+).*", "\\1", INFO),
+               AVG_LEN = sub(".*AVG_LEN=([^;]+).*", "\\1", INFO), 
+               AVG_START = sub(".*AVG_START=([^;]+).*", "\\1", INFO), 
+               AVG_END = sub(".*AVG_END=([^;]+).*", "\\1", INFO)) %>% 
+        mutate(SVTYPE = case_when(SVTYPE == "INS" ~ "INS", 
+               SVTYPE == "DEL" ~ "DEL", 
+               (!SVTYPE %in% c("INS", "DEL")) &  !is.na(TYPE) ~ TYPE, 
+               (!SVTYPE %in% c("INS", "DEL")) &  is.na(TYPE) ~ "NA"))
+    comb = comb[,c(1,2,3,10:23,27:33)]
+    comb = comb %>% dplyr::mutate(across(colnames(comb)[4:17], ~ case_when(. == "0|0" ~ 0, . == "0" ~ 0, . == "1|1" ~ 1, . == "1" ~ 1,  . == "0|1" ~ 1, . == "1|0" ~ 1, . == ".|1" ~ 1, . == "0|."~ 0, . == ".|0" ~ 0, . == "1|." ~ 1 )))
+    all_comb[[i]] = comb
+}
+all_comb = bind_rows(all_comb)
+all_comb$LEN = abs(all_comb$ALTLEN - all_comb$REFLEN)
+all_comb$nb_species = rowSums(all_comb[,c(4:17)] > 0)
+for_karyotype = all_comb[all_comb$nb_species >=1,]
+kary = NULL
+for (i in unique(for_karyotype$CHROM)){
+  tmp = for_karyotype[for_karyotype$CHROM ==i,]
+  bed1 = bed[bed$Chr ==i,]$End
+  tmp$blocks = ezCut(x = as.numeric(tmp$POS), breaks = seq(1,as.numeric(bed1), 500000))
+  kary = rbind(kary,tmp)
+}
+kary$POS = as.numeric(kary$POS)
+kary = kary %>%
+    group_by(CHROM) %>%
+    mutate(
+        max_pos = max(POS, na.rm = TRUE),
+        blocks = if_else(
+            str_detect(blocks, "^>\\s*\\d+"),
+            str_replace(blocks, "^>\\s*(\\d+)", "(\\1 - ") %>%
+                paste0(max_pos, "]"),
+            blocks
+        )
+    ) %>%
+    select(-max_pos)
+kary = kary[,c(1,2,27)] %>% group_by(blocks, CHROM) %>% summarise(n_distinct(POS)) %>% mutate(Start =as.numeric(sapply(str_split(str_remove(as.character(blocks), "\\("), " - "), .subset, 1)), End = as.numeric(sapply(str_split(str_remove(as.character(blocks), "\\]"), " - "), .subset, 2))) %>% ungroup() %>% dplyr::select(c(2,4,5,3))
+colnames(kary) = c("Chr", "Start", "End", "Value")
+kary = merge(kary, bed, by = "Chr") %>%  
+    mutate(blocks = round(End.y/16,0)) %>%
+    group_by(Chr) %>%
+    group_modify(~ {
+        breaks <- seq(unique(.x$blocks), unique(.x$End.y) - unique(.x$blocks), length.out = 15)
+        .x %>%
+            mutate(block = ezCut(End.x, 
+                                 breaks, labels = as.character(seq(1,16,1))))
+    }) %>%
+    ungroup() %>% 
+    group_by(Chr, block, blocks) %>% 
+    summarise(SVdensity = sum(Value)) 
+kary$chr_category = case_when(kary$Chr  %in% c("rPodCre2.1#1#Z") ~ "Z", kary$Chr %in% c("rPodCre2.1#1#18") ~ "18", .default = "17 Autosomes")
+
+#Load SNPs and block
+snps = readRDS("../pggb_allcommunities/general_stats/SNP.rideogram.data.rds")
+snps = merge(snps, bed, by.x = "CHROM", by.y = "Chr") %>%  
+    mutate(blocks = round(End/16,0)) %>%
+    group_by(CHROM) %>%
+    group_modify(~ {
+        breaks <- seq(unique(.x$blocks), unique(.x$End) - unique(.x$blocks), length.out = 15)
+        .x %>%
+            mutate(block = ezCut(end, 
+                                 breaks, labels = as.character(seq(1,16,1))))
+    }) %>%
+    ungroup() %>% 
+    group_by(CHROM, block, blocks) %>% 
+    summarise(SVdensity = sum(value)) 
+snps$chr_category = case_when(snps$CHROM  %in% c("rPodCre2.1#1#Z") ~ "Z", snps$CHROM %in% c("rPodCre2.1#1#18") ~ "18", .default = "17 Autosomes")
+
+snps %>% ggplot(aes(block, SVdensity)) + geom_violin(fill = "#3C561E") + theme_bw() + labs(x = "genomic blocks along chromosomes", y = "SNPs Count") + theme(text = element_text(size = 15), axis.text.x = element_blank()) + facet_grid(chr_category~., scales = "free")
+
+#Dispensable nodes legnth of nodes summary
+dispfiles = list.files("../pggb_allcommunities/", pattern = "nodes.fasta.len", full.names = T, recursive = T)
+disppg = NULL
+for (i in dispfiles){
+  df = fread(i)
+  df$blocks = ezCut(df$V2,seq(1,100,49))
+  disppg = rbind(disppg, df %>% group_by(blocks) %>% summarise(sum(V2), count = n()))
+}
+
+#Dispensable nodes distibution
+dispnodes = read.delim("/home/zajac/PhyloTree/GenomicMosaicism/all_chr_node_cats.txt", sep = "\t")
+dispnodes$chr_category = case_when(dispnodes$Focal_chr  %in% c("Z") ~ "Z", dispnodes$Focal_chr %in% c("18") ~ "18", .default = "17 Autosomes")
+
+
+#Load INVs
+all_invs = read.delim("../INVERSIONS/inversions.syri.impg.mapc.filtered.clustered.0.9.txt")
+shared = all_invs[all_invs$is_singleton == "FALSE",] %>% 
+    dplyr::select("species","chr", "max_start" ,"min_end", "mean_length") %>% 
+    separate(species, into = c("species", "haplotype", "chr"), sep = "#") %>%
+    dplyr::select(1,3,4,5,6) %>% 
+    unique() %>% 
+    pivot_wider(names_from = species, values_from = mean_length) %>% 
+    replace(is.na(.),0) %>% mutate(across(c(4:17), ~ if_else(. > 0, 1,0))) %>%
+    mutate(N = rowSums(.[4:17])) 
+all_invs$shared_between_species = ""
+all_invs[paste0(all_invs$max_start, "-", all_invs$min_end) %in% paste0(shared[shared$N >1,]$max_start,"-",shared[shared$N >1,]$min_end),]$shared_between_species = "Yes"
+
+# Check overlap with repeats
+all_invs_gr <- makeGRangesFromDataFrame(all_invs[,c("species", "start_species_syri", "end_species_syri", "shared_between_species")], 
+                                     seqnames.field  =  "species", start.field = "start_species_syri", end.field = "end_species_syri", keep.extra.columns = T
+)
+hits = findOverlaps(all_invs_gr, repeats_gr)
+query_hits   <- all_invs_gr[queryHits(hits)]
+subject_hits <- repeats_gr[subjectHits(hits)]
+overlaps <- pintersect(query_hits, subject_hits)
+result <- data.frame(
+    query_seqname   = as.character(seqnames(query_hits)),
+    query_start     = start(query_hits),
+    query_end       = end(query_hits),
+    inv_len         = end(query_hits) - start(query_hits),
+    shared          = query_hits$shared_between_species,
+    subject_seqname = as.character(seqnames(subject_hits)),
+    subject_start   = start(subject_hits),
+    subject_end     = end(subject_hits),
+    repeat_len      = end(subject_hits) - start(subject_hits),
+    overlap_start   = start(overlaps),
+    overlap_end     = end(overlaps),
+    repeats = subject_hits$repeat_class,
+    overlap_length  = width(overlaps)
+) %>% unique()
+inv_overlap = result %>% group_by(query_seqname, query_start, query_end, shared) %>% dplyr::summarise(overlap_length = sum(overlap_length), repeat_len = sum(repeat_len), inv_len = mean(inv_len)) 
+
+#Load overlap of INDELs with TEs
+insertions = fread("../Species_Specific_Masking/transposable_elements_fasta/temp.INS.filt.txt")
+deletions = fread("../Species_Specific_Masking/transposable_elements_fasta/temp.DEL.filt.txt")
+```
+
+
+# Proportion of different size blocks in pangenome
+
+```{r}
+p1 = disppg %>% group_by(blocks) %>% summarise(length = sum(`sum(V2)`), count = sum(count)) %>% ggplot(aes(factor(blocks, levels = c("<= 1", "(1 - 50]", "> 50")),count/1000000)) + geom_col() + theme_bw() + labs(x = "Node length (bp)", y = "") + ggtitle("Count (Mio)")
+p2 = disppg %>% group_by(blocks) %>% summarise(length = sum(`sum(V2)`), count = sum(count)) %>% ggplot(aes(factor(blocks, levels = c("<= 1", "(1 - 50]", "> 50")),length/1000000000)) + geom_col() + theme_bw() + labs(x = "Node length (bp)", y = "") + ggtitle("Length (Gbp)")
+
+p1 + p2
+
+pdf("../Figures/Disp_node_length.pdf", width = 5, height = 5)
+p1 + p2
+dev.off()
+```
+
+# Combined distribution of SNPs, Dispnodes, SVs and Repeats
+
+```{r}
+
+dispnodes$block_factor <- factor(
+    dispnodes$block,
+    levels = 1:16
+)
+
+summary_repeats$block_factor <- factor(
+    summary_repeats$block,
+    levels = 1:16
+)
+
+kary$block_factor <- factor(
+    kary$block,
+    levels = 1:16
+)
+
+snps$block_factor <- factor(
+    snps$block,
+    levels = 1:16
+)
+
+# Dispensable nodes
+p3 <- ggplot(
+    dispnodes[dispnodes$cat == "dispensable", ],
+    aes(block_factor, value)
+) +
+    geom_violin(
+        fill = "grey75",
+        colour = "grey30",
+        linewidth = 0.25,
+        width = 0.9,
+        trim = FALSE
+    ) +
+    facet_grid(
+        . ~ chr_category,
+        scales = "free_y",
+        space = "fixed"
+    ) +
+    scale_y_continuous(
+        n.breaks = 4,
+        expand = expansion(mult = c(0.05, 0.05))
+    ) +
+    labs(
+        y = "Dispensable nodes (%)"
+    ) +
+    theme_classic(base_size = 10) +
+    theme(
+        # Remove x-axis
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        
+        # Show chromosome labels only here
+        strip.background = element_blank(),
+        strip.text = element_text(
+            size = 9,
+            face = "bold"
+        ),
+        
+        panel.spacing = unit(0.25, "lines"),
+        
+        axis.title.y = element_text(size = 9),
+        axis.text.y = element_text(size = 8),
+        
+        plot.margin = margin(2, 3, 0, 3)
+    )
+
+
+# TEs and repeats
+
+p4 <- ggplot(
+    summary_repeats,
+    aes(block_factor, repeat_covered_bases)
+) +
+    geom_violin(
+        fill = "grey75",
+        colour = "grey30",
+        linewidth = 0.25,
+        width = 0.9,
+        trim = FALSE
+    ) +
+    facet_grid(
+        . ~ chr_category,
+        scales = "free_y",
+        space = "fixed"
+    ) +
+    scale_y_continuous(
+        n.breaks = 4,
+        expand = expansion(mult = c(0.05, 0.05))
+    ) +
+    labs(
+        y = "TEs & repeats (%)"
+    ) +
+    theme_classic(base_size = 10) +
+    theme(
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        
+        # Hide repeated chromosome labels
+        strip.background = element_blank(),
+        strip.text = element_blank(),
+        
+        panel.spacing = unit(0.25, "lines"),
+        
+        axis.title.y = element_text(size = 9),
+        axis.text.y = element_text(size = 8),
+        
+        plot.margin = margin(0, 3, 0, 3)
+    )
+
+
+#Indels 
+
+p5 <- ggplot(
+    kary,
+    aes(
+        block_factor,
+        SVdensity / 1000
+    )
+) +
+geom_violin(
+    data = subset(
+        kary,
+        chr_category == "17 Autosomes"
+    ),
+    fill = "grey75",
+    colour = "grey30",
+    linewidth = 0.25,
+    width = 0.9,
+    trim = FALSE
+) +
+geom_point(
+    data = subset(
+        kary,
+        chr_category %in% c("18", "Z")
+    ),
+    position = position_jitter(
+        width = 0.10,
+        height = 0,
+        seed = 1
+    ),
+    size = 1.5,
+    alpha = 0.7
+) +
+    
+    facet_grid(
+        . ~ chr_category,
+        scales = "free_y",
+        space = "fixed"
+    ) +
+    
+    scale_y_continuous(
+        n.breaks = 4,
+        expand = expansion(mult = c(0.05, 0.05))
+    ) +
+    
+    labs(
+        y = "INDELs (≥50 bp) (×10³)"
+    ) +
+    
+    theme_classic(base_size = 10) +
+    theme(
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        
+        # Chromosome labels already shown at top
+        strip.background = element_blank(),
+        strip.text = element_blank(),
+        
+        panel.spacing = unit(0.25, "lines"),
+        
+        axis.title.y = element_text(size = 9),
+        axis.text.y = element_text(size = 8),
+        
+        plot.margin = margin(0, 3, 0, 3)
+    )
+
+
+#SNPs
+
+p6 <- ggplot(
+    snps,
+    aes(
+        block_factor,
+        SVdensity / 10000
+    )
+) +
+    
+geom_violin(
+    data = subset(
+        snps,
+        chr_category == "17 Autosomes"
+    ),
+    fill = "grey75",
+    colour = "grey30",
+    linewidth = 0.25,
+    width = 0.9,
+    trim = FALSE
+) +
+    
+geom_point(
+    data = subset(
+        snps,
+        chr_category %in% c("18", "Z")
+    ),
+    position = position_jitter(
+        width = 0.10,
+        height = 0,
+        seed = 1
+    ),
+    size = 1.5,
+    alpha = 0.7
+) +
+    
+    facet_grid(
+        . ~ chr_category,
+        scales = "free_y",
+        space = "fixed"
+    ) +
+    
+    scale_y_continuous(
+        n.breaks = 4,
+        expand = expansion(mult = c(0.05, 0.05))
+    ) +
+    
+    labs(
+        y = "SNPs (×10⁴)",
+        x = "Genomic blocks along chromosomes"
+    ) +
+    
+    theme_classic(base_size = 10) +
+    theme(
+        # Only bottom plot gets x-axis
+        axis.title.x = element_text(size = 9),
+        axis.text.x = element_text(size = 7),
+        axis.ticks.x = element_line(linewidth = 0.25),
+        
+        # Chromosome labels already shown at top
+        strip.background = element_blank(),
+        strip.text = element_blank(),
+        
+        panel.spacing = unit(0.25, "lines"),
+        
+        axis.title.y = element_text(size = 9),
+        axis.text.y = element_text(size = 8),
+        
+        plot.margin = margin(0, 3, 2, 3)
+    )
+
+
+# Combine 
+final_plot <- p3 / p4 / p5 / p6 +
+    plot_layout(
+        guides = "collect",
+        heights = c(1, 1, 1, 1)
+    )
+
+final_plot
+
+
+pdf("../Figures/Distribution_all_combined.pdf", width = 10, height = 8)
+final_plot
+dev.off()
+```
+
+# Percentage of TEs in different genomic features
+
+
+```{r}
+deletions$perc_overlap = deletions$overlap_length * 100/deletions$width
+insertions$perc_overlap = insertions$leninTE * 100/insertions$LEN
+inv_overlap$perc_overlap = inv_overlap$overlap_length*100/inv_overlap$inv_len
+
+p7 = rbind(inv_overlap[,c("query_seqname", "perc_overlap", "shared")] %>% 
+             dplyr::rename("seqnames" = "query_seqname") %>% 
+             mutate("Feature" = if_else(shared == "Yes", "shared INV", "unique INV"), seqnames = paste0(sapply(str_split(seqnames, "#"), .subset, 1), "#", sapply(str_split(seqnames, "#"), .subset, 2)))  %>% 
+             group_by(Feature, seqnames) %>% 
+             dplyr::summarise(perc_overlap = mean(perc_overlap)),
+      summary_repeats %>% 
+        group_by(Focal_genome, Focal_hap) %>% 
+        summarise(perc_overlap = mean(repeat_covered_bases)) %>% 
+        mutate("seqnames" = paste0(Focal_genome, "#", Focal_hap)) %>% 
+        ungroup() %>% dplyr::select(4,3) %>% mutate("Feature" = "Genome-wide"),
+      deletions[,c("seqnames","perc_overlap")] %>% 
+        mutate("Feature" = "DEL (>=50bp)") %>% 
+        mutate(perc_overlap = if_else(perc_overlap > 100, 100, perc_overlap)) %>% 
+        group_by(Feature) %>% dplyr::summarise(perc_overlap = mean(perc_overlap)),
+      insertions[,c("species", "perc_overlap")] %>% 
+        dplyr::rename("seqnames" = "species") %>% 
+        mutate("Feature" = "INS (>=50bp)") %>% 
+        mutate(perc_overlap = if_else(perc_overlap > 100, 100, perc_overlap)) %>% 
+        group_by(Feature, seqnames) %>% 
+        dplyr::summarise(perc_overlap = mean(perc_overlap))
+) %>% 
+  ggplot(aes(factor(Feature, levels = c("Genome-wide", "DEL (>=50bp)", "INS (>=50bp)", "shared INV", "unique INV")),perc_overlap )) + 
+  geom_boxplot() + theme_bw() + labs(x = "", y = "% of length in TEs and Repeats") + 
+
+p7 
+
+pdf("../Figures/Repeats_in_features.pdf", width = 5, height = 5)
+p7 +  stat_compare_means(comparisons = combn(unique(p7$data$Feature), 2, simplify = FALSE)[c(2,5)], method = "wilcox.test", label = "p.signif", hide.ns = TRUE)
+dev.off()
+
+```
+
+# Percentage of TEs in different genomic features
+
+
+```{r}
+deletions$perc_overlap = deletions$overlap_length * 100/deletions$width
+insertions$perc_overlap = insertions$leninTE * 100/insertions$LEN
+inv_overlap$perc_overlap = inv_overlap$overlap_length*100/inv_overlap$inv_len
+
+p7 = rbind(inv_overlap[,c("query_seqname", "perc_overlap", "shared")] %>% 
+             dplyr::rename("seqnames" = "query_seqname") %>% 
+             mutate("Feature" = if_else(shared == "Yes", "shared INV", "unique INV"), seqnames = paste0(sapply(str_split(seqnames, "#"), .subset, 1), "#", sapply(str_split(seqnames, "#"), .subset, 2)))  %>% 
+             group_by(Feature, seqnames) %>% 
+             dplyr::summarise(perc_overlap = mean(perc_overlap)),
+      summary_repeats %>% 
+        group_by(Focal_genome, Focal_hap) %>% 
+        summarise(perc_overlap = mean(repeat_covered_bases)) %>% 
+        mutate("seqnames" = paste0(Focal_genome, "#", Focal_hap)) %>% 
+        ungroup() %>% dplyr::select(4,3) %>% mutate("Feature" = "Genome-wide"),
+      deletions[,c("seqnames","perc_overlap")] %>% 
+        mutate("Feature" = "DEL (>=50bp)") %>% 
+        mutate(perc_overlap = if_else(perc_overlap > 100, 100, perc_overlap)) %>% 
+        group_by(Feature) %>% dplyr::summarise(perc_overlap = mean(perc_overlap)),
+      insertions[,c("species", "perc_overlap")] %>% 
+        dplyr::rename("seqnames" = "species") %>% 
+        mutate("Feature" = "INS (>=50bp)") %>% 
+        mutate(perc_overlap = if_else(perc_overlap > 100, 100, perc_overlap)) %>% 
+        group_by(Feature, seqnames) %>% 
+        dplyr::summarise(perc_overlap = mean(perc_overlap))
+) %>% 
+  ggplot(aes(factor(Feature, levels = c("Genome-wide", "DEL (>=50bp)", "INS (>=50bp)", "shared INV", "unique INV")),perc_overlap )) + 
+  geom_boxplot() + theme_bw() + labs(x = "", y = "% of length in TEs and Repeats") 
+
+p7 
+
+pdf("../Figures/Repeats_in_features.pdf", width = 5, height = 5)
+p7 +  stat_compare_means(comparisons = combn(unique(p7$data$Feature), 2, simplify = FALSE)[c(2,5)], method = "wilcox.test", label = "p.signif", hide.ns = TRUE)
+dev.off()
+

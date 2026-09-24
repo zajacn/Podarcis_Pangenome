@@ -1,0 +1,483 @@
+---
+title: "Inversions"
+author: "Natalia Zajac"
+date: "14/07/2026"
+output:
+  html_document: 
+    highlight: pygments
+    theme: sand
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r include=FALSE}
+knitr::opts_chunk$set(
+  comment = '', fig.width = 8, fig.height = 8, warning = FALSE, error = FALSE
+)
+```
+
+```{r setup, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+library(pafr)
+library(utils)
+library(dplyr)
+library(tidyverse)
+library(reshape2)
+library(cowplot)
+library(patchwork)
+library(ezRun)
+library(ggbeeswarm)
+library(data.table)
+library(DT)
+library(ggh4x)
+library(rtracklayer)
+source("functions.R")
+
+#Load inversions
+invs = read.delim("../INVERSIONS/inversions.syri.impg.mapc.filtered.clustered.0.9.txt")
+invs$mean_length = invs$min_end - invs$max_start
+invs$width = invs$end - invs$start
+
+bed = read.delim("/groups/mpistaff/Zajac/genomes/ncbi_dataset/data/ALL_corrected_unmasked/rPodCre2.1#1.all.fasta.fai", header = F)
+bed$Start = 1
+bed = bed[,c(1,6,2)]
+colnames(bed) = c("Chr", "Start", "End")
+bed$length = bed$End - bed$Start
+bed$Chr = factor(bed$Chr, levels = paste0("rPodCre2.1#1#", c(seq(1,18,1), "Z")))
+
+sample_data = read.delim("/groups/mpistaff/Zajac/genomes/sample_data.tsv")
+smp = c(setNames(sample_data$clade,paste0(sample_data$MyName, "#1")), setNames(sample_data$clade,paste0(sample_data$MyName, "#2")))
+sample_data$clade = factor(sample_data$clade, levels = c("Balkan", "Muralis", "Siculus", "Iberian", "Sicilian-Maltese", "Western"))
+
+#load centromeres
+centrs = read.delim("/groups/mpistaff/Zajac/analyses/Centromers/manually_curated_centromeres_quartet.txt")
+
+#Load also other bed files
+beds = list.files("/groups/mpistaff/Zajac/genomes/ncbi_dataset/data/ALL_corrected_unmasked/", pattern = "fai", full.names = TRUE)
+beds = lapply(beds, function(x){ 
+  bed = read.delim(x, header = F)
+  bed$Start = 1
+  bed = bed[,c(1,6,2)]
+  colnames(bed) = c("Chr", "Start", "End")
+  bed  = bed %>% separate(Chr, into = c("Focal_genome",  "Focal_hap", "Focal_chr"), sep = "#")
+  return(bed)
+})
+beds = bind_rows(beds)
+```
+
+
+# Length distribution of shared inversions vs singletons
+
+```{r, fig.height=5, fig.width=7}
+ggplot(invs, aes(width, colour = is_singleton)) + geom_density() + scale_x_log10()
+```
+
+
+# Summary Numbers
+
+```{r, fig.height=5, fig.width=7}
+
+shared = invs[invs$is_singleton == "FALSE",] %>% 
+    dplyr::select("species","chr", "max_start" ,"min_end", "mean_length") %>% 
+    separate(species, into = c("species", "haplotype", "chr"), sep = "#") %>%
+    dplyr::select(1,3,4,5,6) %>% 
+    unique() %>% 
+    pivot_wider(names_from = species, values_from = mean_length) %>% 
+    replace(is.na(.),0) %>% mutate(across(c(4:17), ~ if_else(. > 0, 1,0))) %>%
+    mutate(N = rowSums(.[4:17])) 
+
+invs$shared_between_species = ""
+invs[paste0(invs$max_start, "-", invs$min_end) %in% paste0(shared[shared$N >1,]$max_start,"-",shared[shared$N >1,]$min_end),]$shared_between_species = "Yes"
+
+print(data.frame("total_number_of_inversions_across_all_species" = nrow(unique(invs[invs$is_singleton == "TRUE",c(6,7,8)])) + nrow(shared[shared$N == 1,]) + sum(shared[shared$N > 1,]$N),
+           "total_numer_of_inversions_shared_between_species" = sum(shared[shared$N > 1,]$N),
+           "total_number_of_inversions_unique_to_each_species" = nrow(unique(invs[invs$is_singleton == "TRUE",c(6,7,8)])) + nrow(shared[shared$N == 1,])))
+
+print(data.frame(value2 = colSums(shared[shared$N == 1,c(4:17)])) %>% 
+        rownames_to_column("species") %>% 
+        left_join(invs[which(invs$is_singleton == "TRUE"),] %>% 
+                    mutate(species = sapply(str_split(species, "#"), .subset, 1)) %>% 
+                    group_by(species) %>% summarise(value = n_distinct(paste0(chr, start, end)))) %>% 
+        mutate(unique_per_species = value + value2) %>% 
+        dplyr::select(1,4))
+
+print(invs %>% mutate(length = end - start) %>% group_by(shared_between_species) %>% summarise(mean(length)) %>% data.frame())
+
+
+```
+
+# Heterozygosity and sharing between species
+
+```{r, fig.height=5, fig.width=7}
+
+invs_split = split(invs,invs$is_singleton)
+
+shared_haplotypes = unique(invs_split$`FALSE` %>% dplyr::select("species_list","chr", "max_start","min_end","mean_length")) %>% 
+  separate(species_list, into = c("species", "haplotype"), sep = "#") %>% 
+  pivot_wider(names_from = haplotype, values_from = mean_length)
+shared_species = shared
+
+homozygosity_in_shared_between_species = shared_haplotypes[shared_haplotypes$max_start %in% shared_species[shared_species$N > 1,]$max_start & shared_haplotypes$min_end %in%  shared_species[shared_species$N > 1,]$min_end,] %>% 
+  mutate(category = if_else(is.na(`1`) | is.na(`2`), "heterozygous", "homozygous")) %>%
+  group_by(category,species) %>% summarise(n_distinct(paste0(max_start, min_end))) %>% 
+  pivot_wider(names_from = category, values_from = `n_distinct(paste0(max_start, min_end))`) %>%
+  replace(is.na(.), 0) %>% 
+  mutate(total = heterozygous + homozygous) %>% 
+  mutate(homozygous = homozygous/total) %>% 
+  mutate(heterozygous = heterozygous/total) 
+
+sing=unique(invs_split$`TRUE` %>% dplyr::select("species_list","chr","start","end")) %>% 
+  separate(species_list, into = c("species", "haplotype"), sep = "#") %>%
+  group_by(species) %>% 
+  summarise("heterozygous" = n_distinct(paste0(chr,start,end)))
+
+homozygosity_in_shared_between_haplotypes = merge(sing, shared_haplotypes[!(shared_haplotypes$max_start %in% shared_species[shared_species$N > 1,]$max_start & shared_haplotypes$min_end %in%  shared_species[shared_species$N > 1,]$min_end),] %>% 
+        mutate(category = if_else(is.na(`1`) | is.na(`2`), "heterozygous", "homozygous")) %>%
+        group_by(category,species) %>% summarise(n_distinct(paste0(max_start, min_end))) %>% 
+        pivot_wider(names_from = category, values_from = `n_distinct(paste0(max_start, min_end))`), by = "species", all.x = TRUE) %>%
+  replace(is.na(.), 0) %>% 
+  mutate(total = heterozygous + homozygous) %>% 
+  mutate(homozygous = homozygous/total) %>% 
+  mutate(heterozygous = heterozygous/total) 
+
+homozygosity_in_shared_between_haplotypes$category2 = "unique_to_each_species"
+homozygosity_in_shared_between_species$category2 = "shared_between_species"
+
+df = rbind(homozygosity_in_shared_between_haplotypes, homozygosity_in_shared_between_species)
+df = df %>% reshape2::melt(id.vars = colnames(df)[c(-2,-3)])
+df$variable = as.character(df$variable)
+df[df$species %in% c("PodMur1", "rPodLil1.2", "rPodRaf1"),]$variable = "unknown"
+df$species = sample_data[match(df$species, sample_data$MyName),]$Organism.Name
+df$clade = sample_data[match(df$species, sample_data$Organism.Name),]$clade
+
+#Now lets plot 
+clade_colors <- c("Iberian" = "magenta2", "Muralis" ="green", "Siculus" ="gold2", "Sicilian-Maltese" ="darkcyan","Western" ="blue3", "Balkan" ="brown")
+n_clades  <- n_distinct(df$clade)
+n_species <- n_distinct(df$species)
+clade_fill   <- clade_colors[levels(factor(df$clade))]   
+species_fill <- rep("white", n_species)
+
+strip <- strip_nested(
+    background_y = elem_list_rect(fill = c(clade_fill, species_fill)),
+    text_y = element_text(colour = "black", angle = 0, hjust = 1),
+    by_layer_y = FALSE
+)
+
+px = ggplot(df , 
+       aes(x = "", y = value, fill = variable)) +
+    geom_bar(stat = "identity", width = 1) +
+    coord_polar(theta = "y") +
+    facet_nested(clade + species ~ category2, switch = "y", strip = strip) +
+    theme_void() +
+    theme(
+        strip.placement = "outside",
+        strip.text.y.left = element_text(angle = 0, hjust = 1),
+        panel.spacing = unit(0.3, "lines")
+    ) +
+    geom_text(aes(label = scales::percent(value, accuracy = 1)),
+              position = position_stack(vjust = 0.5), size = 3, colour = "white") + scale_fill_manual(values = c("#657827", "#5A2629", "darkgrey"))
+
+px
+
+
+#or 
+clade_colors <- c("Iberian" = "magenta2", "Muralis" = "green", "Siculus" = "gold2",
+                   "Sicilian-Maltese" = "darkcyan", "Western" = "blue3", "Balkan" = "brown")
+
+n_clades  <- n_distinct(df$clade)
+n_species <- n_distinct(df$species)
+clade_fill   <- clade_colors[levels(factor(df$clade))]   
+species_fill <- rep("white", n_species)
+
+# strips now go on the x side instead of y side
+strip <- strip_nested(
+    background_x = elem_list_rect(fill = c(clade_fill, species_fill)),
+    text_x = element_text(colour = "black", angle = 0, hjust = 0.5),
+    by_layer_x = FALSE
+)
+
+px = ggplot(df, 
+       aes(x = value, y = "", fill = variable)) +      # swapped x/y
+    geom_bar(stat = "identity", width = 1) +
+    coord_polar(theta = "x") +                          # theta follows the value axis, now x
+    facet_nested(category2 ~ clade + species,            # formula flipped
+                 switch = "x", strip = strip) +
+    theme_void() +
+    theme(
+        strip.placement = "outside",
+        strip.text.x.bottom = element_text(angle = 0, hjust = 0.5),  # y.left -> x.bottom
+        panel.spacing = unit(0.3, "lines")
+    ) +
+    geom_text(aes(label = scales::percent(value, accuracy = 1)),
+              position = position_stack(vjust = 0.5), size = 3, colour = "white") +
+    scale_fill_manual(values = c("#657827", "#5A2629", "darkgrey"))
+
+px
+
+pv = merge(data.frame(value2 = colSums(shared[shared$N == 1,c(4:17)])) %>% 
+          rownames_to_column("species") %>% 
+          left_join(invs[which(invs$is_singleton == "TRUE"),] %>% 
+                        mutate(species = sapply(str_split(species, "#"), .subset, 1)) %>% 
+                        group_by(species) %>% summarise(value = n_distinct(paste0(chr, start, end)))) %>% 
+          mutate(unique_per_species = value + value2) %>% 
+          dplyr::select(1,4), colSums(shared[shared$N > 1,c(4:17)]) %>% data.frame() %>% rownames_to_column("species"), by = "species") %>% dplyr::rename("shared_between_species" = ".") %>% reshape2::melt(id.vars = "species") %>% ggplot(aes(factor(species, levels = c("rPodErh1", "rPodGai1", "rPodMel1", "PodMur1", "rPodMur119", "rPodSic1", "rPodBoc1", "rPodLio1", "rPodVau1", "rPodFil1", "rPodRaf1", "rPodLil1.2", "rPodPit1", "rPodTil1")), value, fill = variable)) + geom_col(position = "dodge") + theme_bw() + scale_fill_manual(values = c("black", "darkgrey")) + labs(x = "", y ="Number of inversions")
+
+pdf("../Figures/INV_heterozygosity.pdf", height = 10, width = 5)
+pv/px
+dev.off()
+
+```
+
+# How many are concordant with species tree
+
+```{r, fig.height=5, fig.width=7}
+df = data.frame(shared_species[shared_species$N > 1,])
+tree = ape::read.tree("/groups/mpistaff/Zajac/genomes/pruned_tree.assembly_names.nwk")
+df = df %>% replace(. > 0, 1) %>% dplyr::select(3:16)
+df$rPodCre2.1 <- 0
+df <- df[, tree$tip.label, drop=FALSE]
+dat <- phyDat(df, type="USER", levels=c("0","1"), compress = FALSE )
+pm <- parsimony(tree, dat, site = "each")
+results <- data.frame(
+    id = rownames(df),
+    parsimony = pm
+)
+df$nb_species = rowSums(df)
+results_sum = merge(results, df[,c(16), drop = FALSE] %>% rownames_to_column("id"), by = "id") %>% group_by(nb_species, parsimony) %>% summarise(n_distinct(id))
+  
+perfect_sites <- which(pm == 1)
+dat_perfect <- phyDat(df[perfect_sites,c(1:15)], type="USER", levels=c("0","1"), compress=FALSE)
+anc.pars <- anc_pars(tree, dat_perfect)
+tree = makeNodeLabel(tree)
+state_mat <- do.call(rbind, anc.pars$state)
+tip_mat <- do.call(rbind, as.list(anc.pars$data))
+all_mat <- rbind(tip_mat, state_mat)
+rownames(all_mat) = c(tree$tip.label, tree$node.label)
+
+branch_counts <- numeric(nrow(tree$edge))
+for (j in 1:nrow(tree$edge)) {
+  parent <- tree$edge[j,1]
+  child  <- tree$edge[j,2]
+  gain_counts  <- numeric(nrow(tree$edge))
+  loss_counts  <- numeric(nrow(tree$edge))
+  
+  for (j in 1:nrow(tree$edge)) {
+    parent <- tree$edge[j,1]
+    child  <- tree$edge[j,2]
+  
+    gain_counts[j] <- sum(all_mat[parent, ] == 1 & all_mat[child, ] == 2)
+    loss_counts[j] <- sum(all_mat[parent, ] == 2 & all_mat[child, ] == 1)
+  }
+}
+tree$gains <- gain_counts
+tree$losses <- loss_counts
+
+p <- ggtree(tree) 
+p$data <- p$data %>%
+  mutate(gains = 0, losses = 0)
+for (i in 1:nrow(tree$edge)) {
+  child <- tree$edge[i,2]
+  p$data$gains[p$data$node == child] <- gain_counts[i]
+  p$data$losses[p$data$node == child] <- loss_counts[i]
+}
+
+p$data = merge(p$data, sample_data[,c(3,17)], by.x = "label", by.y = "MyName", all.x = TRUE)
+p$data = p$data %>% mutate(label = if_else(grepl("Node", label), label, Organism.Name))
+p$data = p$data %>% unique()
+
+dx <- diff(range(p$data$x)) * 0.015
+p +
+    geom_tiplab(offset = 0.02, size = 3, fontface = "italic") +
+    
+    geom_point(data = p$data,
+        aes(x = x, size = gains),
+        shape = 21,
+        fill = "steelblue1",
+        color = "black",
+        alpha = 0.85
+    ) +
+    
+    geom_point( data = p$data,
+        aes(x = x - dx, size = losses),
+        shape = 21,
+        fill = "lightblue",
+        color = "black",
+        alpha = 0.85
+    ) +
+    
+    geom_label(
+        aes(
+            label = paste0("+", gains, " / −", losses)
+        ),
+        size = 3,
+        vjust = -0.8,
+        fill = "beige"
+    ) +
+    
+    theme_tree2() +
+    xlim(0, 0.24) +
+    scale_size_continuous(
+        range = c(1.5, 8),
+        name = "Number of events"
+    ) +
+    theme(text = element_text(face = "italic"))
+```
+
+
+# Are inversions gene poor
+
+```{r, fig.height=5, fig.width=7}
+
+gffs = list.files("/groups/mpistaff/Zajac/proteomes/data/ALL_Tiberius_annotated/", pattern = ".gtf", full.names = T)
+names(gffs) = str_remove(str_remove(gffs, ".gtf"), "/groups/mpistaff/Zajac/proteomes/data/ALL_Tiberius_annotated//")
+gffs[["PodMur1#1"]] = "/groups/mpistaff/Zajac/proteomes/data/GCF_004329235.1/genomic.corrected.gff"
+gffs[["rPodRaf1#1"]] ="/groups/mpistaff/Zajac/proteomes/data/GCF_027172205.1/genomic.corrected.gff"
+
+gffrs = NULL
+for (i in names(gffs)){
+  gff = readGFF(gffs[[i]])
+  gff = makeGRangesFromDataFrame(gff[gff$type == "gene",c(1,4,5,9)], keep.extra.columns = T)
+  gffrs[[i]] = gff
+}
+names(mcols(gffrs$`rPodRaf1#1`))  = "group"
+names(mcols(gffrs$`PodMur1#1`))  = "group"
+
+invs$species_list = paste0(sapply(str_split(invs$species, "#"), .subset, 1), "#", sapply(str_split(invs$species, "#"), .subset, 2))
+all_invs = split(invs[,c("species","species_list","start_species_syri","end_species_syri","shared_between_species")], invs[,c("species","species_list","start_species_syri","end_species_syri","shared_between_species")]$species_list)
+all_invs = lapply(all_invs, function(x){makeGRangesFromDataFrame(x, seqnames.field = "species", start.field = "start_species_syri", end.field =  "end_species_syri", keep.extra.columns = T)})
+
+number_of_genes_per_inversion = NULL
+for (i in names(all_invs)){
+  hits = findOverlaps(gffrs[[i]], all_invs[[i]], type = "within")
+  query_hits   <- gffrs[[i]][queryHits(hits)]
+  subject_hits <- all_invs[[i]][subjectHits(hits)]
+  overlaps <- pintersect(query_hits, subject_hits)
+  overlap_lengths <- width(overlaps)
+  result <- data.frame(
+      query_seqname   = as.character(seqnames(query_hits)),
+      query_start     = start(query_hits),
+      query_end       = end(query_hits),
+      query_gene      = query_hits$group,
+      query_gene_length = end(query_hits) - start(query_hits),
+      subject_seqname = as.character(seqnames(subject_hits)),
+      subject_start   = start(subject_hits),
+      subject_end     = end(subject_hits),
+      subject_ID      = subject_hits$species_list,
+      shared_between_species = subject_hits$shared_between_species,
+      overlap_start   = start(overlaps),
+      overlap_end     = end(overlaps),
+      overlap_length  = overlap_lengths
+  ) %>% unique()
+  result = result %>% group_by(subject_seqname, subject_start, subject_end, subject_ID, shared_between_species) %>% summarise(n_distinct(query_gene))
+  number_of_genes_per_inversion = rbind(number_of_genes_per_inversion, result)
+}
+number_of_genes_per_inversion$gene_density = (number_of_genes_per_inversion$`n_distinct(query_gene)` * 1000000)/(number_of_genes_per_inversion$subject_end - number_of_genes_per_inversion$subject_start)
+
+#Gene density across the genome 
+
+gene_density_all_sp= NULL
+for (i in names(gffs)){
+  gff = readGFF(gffs[[i]])
+  seqlens_df <- beds %>% mutate(Chr = paste0(Focal_genome,"#", Focal_hap, "#", Focal_chr)) 
+  seqlens_df = seqlens_df[grepl(i, seqlens_df$Chr),]
+  seqlens <- seqlens_df$End
+  names(seqlens) <- seqlens_df$Chr
+  windows_1Mb <- tileGenome(
+      seqlengths = seqlens,
+      tilewidth = 1000000,
+      cut.last.tile.in.chrom = TRUE
+  )
+  hits = findOverlaps(gffrs[[i]], windows_1Mb, type = "within")
+  query_hits   <- gffrs[[i]][queryHits(hits)]
+  subject_hits <- windows_1Mb[subjectHits(hits)]
+  overlaps <- pintersect(query_hits, subject_hits)
+  overlap_lengths <- width(overlaps)
+  result <- data.frame(
+      query_seqname   = as.character(seqnames(query_hits)),
+      query_start     = start(query_hits),
+      query_end       = end(query_hits),
+      query_gene      = query_hits$group,
+      query_gene_length = end(query_hits) - start(query_hits),
+      subject_seqname = as.character(seqnames(subject_hits)),
+      subject_start   = start(subject_hits),
+      subject_end     = end(subject_hits),
+      overlap_start   = start(overlaps),
+      overlap_end     = end(overlaps),
+      overlap_length  = overlap_lengths
+  ) %>% unique()
+  result = result %>% group_by(subject_seqname, subject_start, subject_end) %>% summarise(gene_density = n_distinct(query_gene))
+  gene_density_all_sp = rbind(gene_density_all_sp, result)
+}
+
+p = rbind(gene_density_all_sp[,c(1,4)] %>% mutate(category2 = "genome_average") %>% mutate(shared_between_species = "genome_wide_average"), number_of_genes_per_inversion[,c(1,7,5)] %>% mutate(category2 = "within_inversions")) %>% mutate(species = sapply(str_split(subject_seqname, "#"), .subset, 1)) %>% mutate(shared_between_species = case_when(shared_between_species == "Yes"~ "inversions_shared_between_species",shared_between_species == ""~ "inversions_unique_to_each_species", .default =  "genome_wide_average")) %>% filter(species != "rPodCre2.1") %>% ggplot(aes(species, gene_density, fill = shared_between_species)) + geom_violin() + scale_fill_manual(values = c("darkgrey","#923700",  "#002542")) + theme_bw() + labs(x = "", y = "Gene density per 1Mb", fill = "category") + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+p$data$species = sample_data[match(p$data$species, sample_data$MyName),]$Organism.Name
+
+
+pdf("../Figures/Gene_density_in_INVs.pdf", width = 6, height = 5)
+ggplot(p$data, aes(shared_between_species, gene_density)) + 
+  geom_boxplot() + 
+  theme_bw() + 
+  stat_compare_means(comparisons = combn(unique(p$data$shared_between_species), 2, simplify = FALSE), method = "wilcox.test", label = "p.signif", hide.ns = TRUE) + 
+  labs(x = "", y = "Gene density (/1Mb)")
+dev.off()
+```
+
+#How far are inversions from centromeres
+
+```{r, fig.height=5, fig.width=7}
+
+invs %>% 
+  left_join(centrs %>% mutate(species = paste0(Species, "#", Chr)) %>% 
+              dplyr::select(5,3,4) %>% unique()) %>% 
+  mutate(mid_point_invs = start + (end - start)/2, 
+         mid_point_centr = centromere_start + (centromere_end - centromere_start)/2) %>% 
+  mutate(diff = abs(mid_point_centr -mid_point_invs)) %>% 
+  filter(!is.na(diff)) %>% group_by(shared_between_species) %>% 
+  summarise(median(diff))
+
+```
+
+```{r, fig.height=5, fig.width=7}
+
+invgr = makeGRangesFromDataFrame(invs[,c(6,7,8,19)] %>% mutate(category = "INV"), seqnames.field = "species", start.field = "start_species_syri", end.field = "end_species_syri", keep.extra.columns = T)
+centrsgr = makeGRangesFromDataFrame(centrs[,c(1:4)] %>% mutate(seqname = paste0(Species, "#", Chr)) %>% unique(), seqnames.field = "seqname", start.field = "centromere_start", end.field = "centromere_end")
+hits = findOverlaps(invgr, centrsgr)
+query_hits   <- invgr[queryHits(hits)]
+subject_hits <- centrsgr[subjectHits(hits)]
+overlaps <- pintersect(query_hits, subject_hits)
+
+result <- data.frame(
+  query_seqname   = as.character(seqnames(query_hits)),
+  query_start     = start(query_hits),
+  query_end       = end(query_hits), shared = query_hits$shared_between_species,
+  subject_seqname = as.character(seqnames(subject_hits)),
+  subject_start   = start(subject_hits),
+  subject_end     = end(subject_hits),
+  overlap_length  = width(overlaps)
+) %>% unique()
+
+```
+
+
+
+#Proportion of core disp and private in each inversion
+
+```{r, fig.height=5, fig.width=7}
+
+list_of_chr = unique(invs$species)
+list_of_files = list.files("../PhyloTree/GenomicMosaicism/", pattern = ".paths.order.length.txt", full.names = T)
+
+divergence_in_inversions = NULL
+for (i in list_of_chr){
+  inversions = invs[invs$species == i,c(10,11,12)]
+  file_of_nodes = list_of_files[grepl(paste0(i,".paths"),list_of_files)]
+  if (nrow(inversions) > 0){
+    file_of_nodes = fread(file_of_nodes)
+  }
+  summary_of_nodes = apply(inversions, 1, function(x) file_of_nodes[file_of_nodes$start >= x[["subject_start"]] & file_of_nodes$end <= x[["subject_end"]],] %>% group_by(cat) %>% summarise(length = sum(V2)) %>% mutate(species = x[["species"]],subject_start = x[["subject_start"]], subject_end = x[["subject_end"]]))
+  divergence_in_inversions = rbind(divergence_in_inversions,summary_of_nodes)
+}
+
+```
+
