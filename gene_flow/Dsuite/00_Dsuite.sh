@@ -23,7 +23,7 @@ echo $k
 /home/zajac/scripts/Software/Dsuite/Build/Dsuite Fbranch /home/zajac/SYRI/Dsuite/tree_for_Dsuite.nwk /home/zajac/SYRI/Dsuite/communities.combined_combined_tree.txt > /home/zajac/SYRI/Dsuite/Fbranch_output.txt
 
 module load python/3.9.13
-python /home/zajac/scripts/Software/Dsuite/utils/dtools.py /home/zajac/SYRI/Dsuite/Fbranch_output.txt /home/zajac/SYRI/Dsuite/tree_for_Dsuite.nwk --outgroup LacAg1
+python /home/zajac/scripts/Software/Dsuite/utils/dtools.py /home/zajac/SYRI/Dsuite/Fbranch_output.txt /home/zajac/SYRI/Dsuite/tree_for_Dsuite.nwk --outgroup LacAg
 
 ## run Dinvestigate 
-/home/zajac/scripts/Software/Dsuite/Build/Dsuite Dinvestigate --run-name community${k}.Dinvestigate --window=100,100 /home/zajac/SYRI/community${k}/community${k}.rPodCre2.1_to_all/community${k}.combined.forDsuite.vcf /home/zajac/SYRI/Dsuite/SETS.Dsuite.txt /home/zajac/SYRI/Dsuite/test_trios3.txt
+/home/zajac/scripts/Software/Dsuite/Build/Dsuite Dinvestigate --run-name community${k}.Dinvestigate --window=100,100 /home/zajac/SYRI/community${k}/community${k}.rPodCre2.1_to_all/community${k}.combined.forDsuite.vcf /home/zajac/SYRI/Dsuite/SETS.Dsuite.txt /home/zajac/SYRI/Dsuite/test_trios.txt
